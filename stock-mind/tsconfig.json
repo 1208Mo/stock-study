@@ -1,0 +1,23 @@
+{
+    "compilerOptions": {
+        "target": "ES2020",
+        "useDefineForClassFields": true,
+        "lib": ["ES2020", "DOM", "DOM.Iterable"],
+        "module": "commonjs",
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        "strict": true,
+        "baseUrl": ".",
+        "moduleResolution": "node",
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "noEmit": false,
+        "outDir": "out",
+        "paths": {
+            "@renderer/*": ["src/renderer/src/*"]
+        }
+    },
+    "include": ["src/main", "src/preload"],
+    "exclude": ["node_modules", "out", "dist", "src/renderer"]
+}

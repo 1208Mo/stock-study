@@ -1,0 +1,68 @@
+{
+    "name": "stock-mind",
+    "version": "1.0.0",
+    "description": "Personal stock learning and investment assistant",
+    "main": "out/main/index.js",
+    "scripts": {
+        "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
+        "build": "electron-vite build",
+        "rebuild:sqlite": "env -u ELECTRON_RUN_AS_NODE npm rebuild better-sqlite3 --runtime=electron --target=31.7.7 --dist-url=https://electronjs.org/headers",
+        "preview": "electron-vite preview",
+        "pack": "electron-builder --dir",
+        "dist": "electron-builder",
+        "dist:mac": "electron-builder && xattr -cr dist/*.dmg && echo '✅ dmg 已去除隔离标记，可直接发给别人'",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@electron-toolkit/utils": "^3.0.0",
+        "@langchain/core": "1.2.1",
+        "@langchain/langgraph": "1.4.7",
+        "@langchain/openai": "1.5.3",
+        "axios": "^1.7.2",
+        "better-sqlite3": "^11.1.2",
+        "echarts": "^5.5.0",
+        "echarts-for-react": "^3.0.2",
+        "node-cron": "^3.0.3",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
+        "react-markdown": "9.0.1",
+        "react-router-dom": "^6.24.0",
+        "zod": "3.25.32",
+        "zustand": "^4.5.3"
+    },
+    "devDependencies": {
+        "@electron-toolkit/preload": "^3.0.0",
+        "@types/better-sqlite3": "^7.6.11",
+        "@types/node": "^20.14.9",
+        "@types/node-cron": "^3.0.11",
+        "@types/react": "^18.3.3",
+        "@types/react-dom": "^18.3.0",
+        "@vitejs/plugin-react": "^4.3.1",
+        "electron": "^31.7.7",
+        "electron-builder": "^24.13.3",
+        "electron-vite": "^5.0.0",
+        "typescript": "^5.5.3",
+        "vite": "^5.3.3"
+    },
+    "build": {
+        "appId": "com.stockmind.app",
+        "productName": "StockMind",
+        "directories": {
+            "output": "dist"
+        },
+        "files": [
+            "out/**/*",
+            "resources/**/*"
+        ],
+        "mac": {
+            "target": "dmg",
+            "icon": "resources/icon.icns",
+            "identity": null,
+            "gatekeeperAssess": false
+        },
+        "win": {
+            "target": "nsis",
+            "icon": "resources/icon.ico"
+        }
+    }
+}
