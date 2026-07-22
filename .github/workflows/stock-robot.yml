@@ -1,10 +1,11 @@
 name: Stock Feishu Robot
+# keep-alive: schedule workflows require recent repo activity to stay enabled
 
 on:
   schedule:
     # 北京时间 = UTC+8，GitHub Actions 用 UTC
     - cron: '0 1 * * 1-5'   # 早报 09:00 BJT
-    - cron: '0 4 * * 1-5'   # 午报 12:00 BJT
+    - cron: '1 5 * * 1-5'   # 午报测试 UTC 05:01（测试完改回 '0 4 * * 1-5'）
     - cron: '0 9 * * 1-5'   # 晚报 17:00 BJT
   workflow_dispatch:         # 支持手动触发
 
