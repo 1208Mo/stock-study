@@ -3,9 +3,10 @@ name: Stock Feishu Robot
 on:
   schedule:
     # 北京时间 = UTC+8，GitHub Actions 用 UTC
-    - cron: '0 1 * * 1-5'   # 早报 09:00 BJT
-    - cron: '7 6 * * 1-5'    # 午报测试 UTC 06:07（测试完改回 '0 4 * * 1-5'）
-    - cron: '0 9 * * 1-5'   # 晚报 17:00 BJT
+    # 说明：整点 cron 排队严重（延迟 10~30min），一律用非整点、偏移到目标时间之前几分钟
+    - cron: '17 0 * * 1-5'   # 早报 BJT 08:17（原 08:47，再提前 30min）
+    - cron: '17 3 * * 1-5'   # 午报 BJT 11:17（原 11:47，再提前 30min）
+    - cron: '17 8 * * 1-5'   # 晚报 BJT 16:17（原 16:47，再提前 30min）
 
   workflow_dispatch:
 
@@ -13,7 +14,7 @@ jobs:
   morning:
     name: 早报
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 1 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 0 * * 1-5' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
   noon:
     name: 午报
     runs-on: ubuntu-latest
-    if: github.event.schedule == '7 6 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 3 * * 1-5' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +56,7 @@ jobs:
   evening:
     name: 晚报
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 9 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '17 8 * * 1-5' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
