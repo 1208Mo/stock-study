@@ -6,7 +6,7 @@
  * 定时任务示例（crontab）：0 9 * * 1-5  cd /path/to/stock-study && node feishu/morning.js
  */
 
-const { fetchSinaNews, fetchEastMoneyAnn, fetchGlobalIndices, callAI, sendFeishuCard } = require("./common");
+const { fetchSinaNews, fetchEastMoneyAnn, fetchGlobalIndices, callAI, sendFeishuCard, getFetchErrors } = require("./common");
 
 async function main() {
     console.log("[早报] 拉取数据...");
@@ -52,10 +52,13 @@ ${annText}
     const aiText = await callAI(prompt);
     console.log("AI 输出：\n", aiText);
 
+    const errors = getFetchErrors();
+    const errorNotice = errors.length ? `\n\n---\n**数据源异常提示**\n${errors.join("\n")}` : "";
+
     await sendFeishuCard({
         title: "🌅 A股早报 · 开盘研判",
         template: "green",
-        content: aiText
+        content: aiText + errorNotice
     });
 }
 

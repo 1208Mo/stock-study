@@ -124,6 +124,19 @@ export interface AgentDiagnostics {
     filteredQuoteCount: number
 }
 
+export interface AmbushSector {
+    code: string
+    name: string
+    changePercent: number
+    return5d: number
+    return10d: number
+    volumeTrend: number
+    consolidation: number
+    distanceToHigh: number
+    score: number
+    reasons: string[]
+}
+
 declare global {
     interface Window {
         api: {
@@ -148,6 +161,7 @@ declare global {
                 getBatchQuotes: (codes: string[]) => Promise<QuoteData[]>
                 getKLine: (code: string, days?: number) => Promise<KLineData[]>
                 getWeeklyKLine: (code: string, weeks?: number) => Promise<KLineData[]>
+                getMonthlyKLine: (code: string, months?: number) => Promise<KLineData[]>
                 getIntraday: (code: string, bars?: number) => Promise<KLineData[]>
                 getNews: (count?: number) => Promise<string[]>
                 getTopSectors: (
@@ -157,6 +171,7 @@ declare global {
                     topSectorCount?: number,
                     perSector?: number
                 ) => Promise<Array<{ code: string; name: string }>>
+                getAmbushSectors: (limit?: number) => Promise<AmbushSector[]>
                 search: (keyword: string) => Promise<{ code: string; name: string }[]>
                 getSectorInfo: (code: string) => Promise<{ sector: string; subSector: string }>
                 getSectorKLine: (bkCode: string, days?: number) => Promise<KLineData[]>
@@ -209,6 +224,15 @@ declare global {
                     news: string[]
                     date: string
                     topSectors?: Array<{ name: string; changePercent: number }>
+                    ambushSectors?: Array<{
+                        name: string
+                        changePercent: number
+                        return5d: number
+                        return10d: number
+                        volumeTrend: number
+                        distanceToHigh: number
+                        reasons: string[]
+                    }>
                 }) => Promise<{ content: string; model: string; provider: string }>
                 agentDecision: (payload: {
                     date: string
@@ -231,15 +255,46 @@ declare global {
                     toolCalls?: ResearchToolTrace[]
                 }>
                 chatStream: (
-                    payload: { messages: Array<{ role: string; content: string }> },
+                    payload: { sessionId: string; input: string },
                     requestId: string
                 ) => void
+                chatStop: (requestId: string) => void
                 onChatChunk: (cb: (data: { requestId: string; chunk: string }) => void) => () => void
                 onChatDone: (
-                    cb: (data: { requestId: string; toolCalls: ResearchToolTrace[] }) => void
+                    cb: (data: {
+                        requestId: string
+                        toolCalls: ResearchToolTrace[]
+                        aborted?: boolean
+                    }) => void
                 ) => () => void
                 onChatError: (cb: (data: { requestId: string; error: string }) => void) => () => void
             }
+            chat: {
+                listSessions: () => Promise<ChatSessionMeta[]>
+                createSession: (title?: string) => Promise<ChatSessionMeta>
+                renameSession: (id: string, title: string) => Promise<ChatSessionMeta | null>
+                deleteSession: (id: string) => Promise<boolean>
+                getMessages: (sessionId: string) => Promise<ChatMessageRow[]>
+                restoreFromCheckpoint: (
+                    sessionId: string
+                ) => Promise<Array<{ role: 'user' | 'assistant'; content: string }>>
+            }
         }
     }
+}
+
+export interface ChatSessionMeta {
+    id: string
+    title: string
+    created_at: string
+    updated_at: string
+}
+
+export interface ChatMessageRow {
+    id: number
+    session_id: string
+    role: string
+    content: string
+    tool_calls: string | null
+    created_at: string
 }

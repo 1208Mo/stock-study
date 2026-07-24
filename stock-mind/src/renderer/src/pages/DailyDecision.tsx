@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import ReactECharts from 'echarts-for-react'
 import type {
     DailyDecisionCandidate,
@@ -7,7 +8,9 @@ import type {
     KLineData,
     StructuredDecision,
     AgentDiagnostics,
+    AmbushSector,
 } from '../types'
+import { computePriceLevels } from '../utils/priceLevels'
 
 type RiskLevel = '稳一点' | '平衡' | '激进'
 
@@ -20,15 +23,15 @@ function optionalMoney(value: number | null) {
     return value === null ? '—' : money(value)
 }
 
-function calcCandidate(quote: QuoteData): DailyDecisionCandidate {
+function calcCandidate(
+    quote: QuoteData,
+    dailyKlines?: KLineData[],
+    weeklyKlines?: KLineData[]
+): DailyDecisionCandidate {
     const isEtf =
         quote.name.includes('ETF') || quote.code.startsWith('5') || quote.code.startsWith('1')
     const highChange = isEtf ? 2.5 : 4
     const severeDrop = isEtf ? -4 : -7
-    const aggressiveFactor = isEtf ? 0.995 : 0.99
-    const conservativeFactor = isEtf ? 0.985 : 0.975
-    const stopFactor = isEtf ? 0.97 : 0.965
-    const takeProfitFactor = isEtf ? 1.025 : 1.04
 
     let noBuyReason: string | null = null
     if (quote.changePercent >= highChange) {
@@ -39,15 +42,18 @@ function calcCandidate(quote: QuoteData): DailyDecisionCandidate {
         noBuyReason = '接近日内高点，等回踩'
     }
 
+    // 用日线/周线综合技术位推导价位（数据不足时回退到系数）
+    const plan = computePriceLevels(quote.price, isEtf, dailyKlines, weeklyKlines)
+
     return {
         code: quote.code,
         name: quote.name,
         price: quote.price,
         changePercent: quote.changePercent,
-        aggressiveEntry: Number((quote.price * aggressiveFactor).toFixed(3)),
-        conservativeEntry: Number((quote.price * conservativeFactor).toFixed(3)),
-        stopLoss: Number((quote.price * stopFactor).toFixed(3)),
-        takeProfit: Number((quote.price * takeProfitFactor).toFixed(3)),
+        aggressiveEntry: Number(plan.aggressiveEntry.toFixed(3)),
+        conservativeEntry: Number(plan.conservativeEntry.toFixed(3)),
+        stopLoss: Number(plan.stopLoss.toFixed(3)),
+        takeProfit: Number(plan.takeProfit1.toFixed(3)),
         noBuyReason,
         high: quote.high,
         low: quote.low,
@@ -145,6 +151,11 @@ export default function DailyDecision() {
     >([])
     const [sectorLoading, setSectorLoading] = useState(false)
 
+    // 潜伏板块（今日不热，但有蓄势/放量迹象）
+    const [ambushSectors, setAmbushSectors] = useState<AmbushSector[]>([])
+    const [ambushLoading, setAmbushLoading] = useState(false)
+    const [ambushError, setAmbushError] = useState('')
+
     // 手动输入解析
     const parsed = useMemo(() => {
         const seen = new Set<string>()
@@ -214,9 +225,23 @@ export default function DailyDecision() {
         }
     }
 
+    async function loadAmbushSectors() {
+        setAmbushLoading(true)
+        setAmbushError('')
+        try {
+            const list = await window.api.market.getAmbushSectors(8)
+            setAmbushSectors(list)
+        } catch (e) {
+            setAmbushError(e instanceof Error ? e.message : String(e))
+        } finally {
+            setAmbushLoading(false)
+        }
+    }
+
     useEffect(() => {
         loadDynamicPool()
         loadSectorTrends()
+        loadAmbushSectors()
     }, [])
 
     function handleCapitalChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -235,13 +260,36 @@ export default function DailyDecision() {
         try {
             const codes = candidates.map((c) => c.code)
             const quotes = await window.api.market.getBatchQuotes(codes)
-            const calculated = quotes.map(calcCandidate)
+            const klineMap = await fetchCandidateKlines(codes)
+            const calculated = quotes.map((q) =>
+                calcCandidate(q, klineMap.daily[q.code], klineMap.weekly[q.code])
+            )
             setCandidates(calculated)
         } catch {
             // silent fail
         } finally {
             setRefreshing(false)
         }
+    }
+
+    // 并发拉取候选池的日/周K线，供技术位推导使用；单个失败不影响整体
+    async function fetchCandidateKlines(codes: string[]): Promise<{
+        daily: Record<string, KLineData[]>
+        weekly: Record<string, KLineData[]>
+    }> {
+        const dailyMap: Record<string, KLineData[]> = {}
+        const weeklyMap: Record<string, KLineData[]> = {}
+        await Promise.allSettled(
+            codes.map(async (code) => {
+                const [d, w] = await Promise.allSettled([
+                    window.api.market.getKLine(code, 90),
+                    window.api.market.getWeeklyKLine(code, 60),
+                ])
+                if (d.status === 'fulfilled') dailyMap[code] = d.value
+                if (w.status === 'fulfilled') weeklyMap[code] = w.value
+            })
+        )
+        return { daily: dailyMap, weekly: weeklyMap }
     }
 
     async function handleGenerate() {
@@ -271,7 +319,12 @@ export default function DailyDecision() {
                 setStructuredDecision(result.structuredDecision)
                 setAgentDiagnostics(result.diagnostics)
                 if (result.quotes && result.quotes.length > 0) {
-                    setCandidates(result.quotes.map(calcCandidate))
+                    const klineMap = await fetchCandidateKlines(result.quotes.map((q) => q.code))
+                    setCandidates(
+                        result.quotes.map((q) =>
+                            calcCandidate(q, klineMap.daily[q.code], klineMap.weekly[q.code])
+                        )
+                    )
                 }
                 return
             }
@@ -293,13 +346,22 @@ export default function DailyDecision() {
 
             let marketContextResult = ''
             if (headlines.length > 0 || topSectors.length > 0) {
-                setLoadingStep('AI 分析今日市场逻辑...')
+                setLoadingStep('AI 分析今日市场逻辑（含潜伏板块）...')
                 try {
                     const today = new Date().toISOString().slice(0, 10)
                     const ctxResult = await window.api.ai.marketContext({
                         news: headlines,
                         date: today,
                         topSectors,
+                        ambushSectors: ambushSectors.map((s) => ({
+                            name: s.name,
+                            changePercent: s.changePercent,
+                            return5d: s.return5d,
+                            return10d: s.return10d,
+                            volumeTrend: s.volumeTrend,
+                            distanceToHigh: s.distanceToHigh,
+                            reasons: s.reasons,
+                        })),
                     })
                     marketContextResult = ctxResult.content
                     setMarketContext(marketContextResult)
@@ -336,11 +398,11 @@ export default function DailyDecision() {
             if (quotes.length === 0) {
                 setCandidates([])
                 setRuleResult(
-                    `行情接口暂时无法访问，以下候选池价位需以你的交易软件实时价 P 手动计算：\n\n` +
+                    `行情接口暂时无法访问，无法拉取实时报价与K线。以下候选池请在你的交易软件里打开日线图，手动读取：\n\n` +
                         activePool
                             .map(
                                 (item) =>
-                                    `${item.code} ${item.name}\n激进挂：P × 0.990　保守挂：P × 0.975\n止损：买入价 × 0.963　第一止盈：买入价 × 1.04`
+                                    `${item.code} ${item.name}\n激进挂 ≈ 日线 MA5（浅回踩买点）\n保守挂 ≈ 日线 MA20（中期支撑）\n止损 ≈ 日线 MA60 或 近20日低点（取更低者）\n第一止盈 ≈ 近20日swing高点`
                             )
                             .join('\n\n')
                 )
@@ -348,7 +410,12 @@ export default function DailyDecision() {
                 return
             }
 
-            const calculated = quotes.map(calcCandidate)
+            setLoadingStep('加载多周期K线（用于技术位推导）...')
+            const klineMapCandidates = await fetchCandidateKlines(quotes.map((q) => q.code))
+
+            const calculated = quotes.map((q) =>
+                calcCandidate(q, klineMapCandidates.daily[q.code], klineMapCandidates.weekly[q.code])
+            )
             setCandidates(calculated)
             setRuleResult(pickRuleBased(calculated, safeCapital, riskLevel))
 
@@ -508,7 +575,7 @@ export default function DailyDecision() {
                     {marketContext && (
                         <div className="decision-block market-context-block markdown-body">
                             <h4>📰 今日市场逻辑（AI 基于实时快讯分析）</h4>
-                            <ReactMarkdown>{marketContext}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{marketContext}</ReactMarkdown>
                         </div>
                     )}
                     {agentDiagnostics && (
@@ -595,7 +662,7 @@ export default function DailyDecision() {
                     {aiResult && (
                         <div className="decision-block markdown-body">
                             <h4>AI 决策版</h4>
-                            <ReactMarkdown>{aiResult}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResult}</ReactMarkdown>
                         </div>
                     )}
                 </section>
@@ -715,6 +782,78 @@ export default function DailyDecision() {
                             </div>
                         )
                     })}
+                </div>
+            </section>
+
+            {/* 潜伏板块（今日不热，但有蓄势/放量迹象） */}
+            <section className="sector-trend-section ambush-section">
+                <div className="sector-trend-header">
+                    <h3>
+                        🕶️ 潜伏候选板块
+                        <span className="ambush-subtitle">
+                            今日温和 · 5-10日趋势健康 · 量能温和放大
+                        </span>
+                    </h3>
+                    <button
+                        className="btn-small"
+                        onClick={loadAmbushSectors}
+                        disabled={ambushLoading}
+                    >
+                        {ambushLoading ? '扫描中...' : '重新扫描'}
+                    </button>
+                </div>
+                {ambushError && <div className="warn-msg">{ambushError}</div>}
+                {ambushLoading && (
+                    <div className="decision-hint">
+                        正在扫描全网 100 个行业板块，识别蓄势中的潜伏机会...
+                    </div>
+                )}
+                {!ambushLoading && ambushSectors.length === 0 && !ambushError && (
+                    <div className="decision-hint">
+                        当前无符合条件的潜伏候选（可能都在热点区/破位区）
+                    </div>
+                )}
+                <div className="ambush-grid">
+                    {ambushSectors.map((s) => (
+                        <div key={s.code} className="ambush-card">
+                            <div className="ambush-card-header">
+                                <span className="ambush-name">{s.name}</span>
+                                <span className="ambush-score">得分 {s.score}</span>
+                            </div>
+                            <div className="ambush-metrics">
+                                <span>
+                                    今日{' '}
+                                    <b className={s.changePercent >= 0 ? 'up' : 'down'}>
+                                        {s.changePercent >= 0 ? '+' : ''}
+                                        {s.changePercent.toFixed(2)}%
+                                    </b>
+                                </span>
+                                <span>
+                                    5日{' '}
+                                    <b className={s.return5d >= 0 ? 'up' : 'down'}>
+                                        {s.return5d >= 0 ? '+' : ''}
+                                        {s.return5d}%
+                                    </b>
+                                </span>
+                                <span>
+                                    10日{' '}
+                                    <b className={s.return10d >= 0 ? 'up' : 'down'}>
+                                        {s.return10d >= 0 ? '+' : ''}
+                                        {s.return10d}%
+                                    </b>
+                                </span>
+                                <span>量比 {s.volumeTrend}x</span>
+                                <span>距20日高 {s.distanceToHigh}%</span>
+                            </div>
+                            {s.reasons.length > 0 && (
+                                <ul className="ambush-reasons">
+                                    {s.reasons.map((r, i) => (
+                                        <li key={i}>{r}</li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    ))}
                 </div>
             </section>
         </div>

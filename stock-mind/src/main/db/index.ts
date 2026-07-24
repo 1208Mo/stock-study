@@ -1,19 +1,68 @@
-import Database from 'better-sqlite3'
 import { join } from 'path'
 import { app } from 'electron'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
+import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
 
-let db: Database.Database
+let db: Database
+let SQL: SqlJsStatic
+let dbPath: string
 
-export function getDb(): Database.Database {
-    return db
+export async function initDatabase(): Promise<void> {
+    const wasmPath = join(__dirname, '..', '..', 'resources', 'sql-wasm.wasm')
+    SQL = await initSqlJs({ locateFile: () => wasmPath })
+
+    dbPath = join(app.getPath('userData'), 'stockmind.db')
+
+    if (existsSync(dbPath)) {
+        const fileBuffer = readFileSync(dbPath)
+        db = new SQL.Database(fileBuffer)
+    } else {
+        db = new SQL.Database()
+    }
+
+    createTables()
+    persist()
+    console.log(`Database initialized at ${dbPath}`)
 }
 
-export function initDatabase(): void {
-    const dbPath = join(app.getPath('userData'), 'stockmind.db')
-    db = new Database(dbPath)
-    db.pragma('journal_mode = WAL')
-    createTables()
-    console.log(`Database initialized at ${dbPath}`)
+function persist(): void {
+    const data = db.export()
+    writeFileSync(dbPath, Buffer.from(data))
+}
+
+type SqlParam = string | number | null | Uint8Array
+
+function run(sql: string, params: SqlParam[] = []): void {
+    db.run(sql, params)
+    persist()
+}
+
+// 批量写入时避免每一次都 persist 到磁盘，交易结束再统一 flush
+function runNoPersist(sql: string, params: SqlParam[] = []): void {
+    db.run(sql, params)
+}
+
+export function flush(): void {
+    persist()
+}
+
+function all<T>(sql: string, params: SqlParam[] = []): T[] {
+    const stmt = db.prepare(sql)
+    stmt.bind(params)
+    const rows: T[] = []
+    while (stmt.step()) {
+        rows.push(stmt.getAsObject() as T)
+    }
+    stmt.free()
+    return rows
+}
+
+function get<T>(sql: string, params: SqlParam[] = []): T | undefined {
+    const stmt = db.prepare(sql)
+    stmt.bind(params)
+    const result = stmt.step() ? (stmt.getAsObject() as T) : undefined
+    stmt.free()
+    return result
 }
 
 function createTables(): void {
@@ -66,57 +115,107 @@ function createTables(): void {
 
     CREATE INDEX IF NOT EXISTS idx_holdings_code ON holdings(code);
     CREATE INDEX IF NOT EXISTS idx_ai_analyses_code ON ai_analyses(code);
+
+    -- 会话元数据（UI 侧的会话列表）
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '新对话',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- UI 侧的消息展示表（与 checkpointer 是两条独立的持久化路径：
+    -- checkpointer 存 Agent 状态用于续跑，这张表存展示用的用户可见消息）
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      tool_calls TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
+
+    -- LangGraph checkpoint 持久化（对应 MemorySaver.storage）
+    CREATE TABLE IF NOT EXISTS chat_checkpoints (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL,
+      parent_id TEXT,
+      checkpoint BLOB NOT NULL,
+      metadata BLOB NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+    );
+
+    -- LangGraph 中间写入持久化（对应 MemorySaver.writes）
+    CREATE TABLE IF NOT EXISTS chat_writes (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      idx INTEGER NOT NULL,
+      channel TEXT NOT NULL,
+      value BLOB NOT NULL,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_thread ON chat_checkpoints(thread_id, checkpoint_ns, checkpoint_id);
+    CREATE INDEX IF NOT EXISTS idx_chat_writes_thread ON chat_writes(thread_id, checkpoint_ns, checkpoint_id);
   `)
 }
 
 // Holdings CRUD
 export function getAllHoldings() {
-    return db.prepare('SELECT * FROM holdings ORDER BY created_at DESC').all()
+    return all('SELECT * FROM holdings ORDER BY created_at DESC')
 }
 
 export function addHolding(code: string, name: string, costPrice: number, quantity: number) {
-    return db
-        .prepare('INSERT INTO holdings (code, name, cost_price, quantity) VALUES (?, ?, ?, ?)')
-        .run(code, name, costPrice, quantity)
+    run('INSERT INTO holdings (code, name, cost_price, quantity) VALUES (?, ?, ?, ?)', [
+        code,
+        name,
+        costPrice,
+        quantity,
+    ])
 }
 
 export function updateHolding(id: number, costPrice: number, quantity: number) {
-    return db
-        .prepare(
-            "UPDATE holdings SET cost_price = ?, quantity = ?, updated_at = datetime('now') WHERE id = ?"
-        )
-        .run(costPrice, quantity, id)
+    run(
+        "UPDATE holdings SET cost_price = ?, quantity = ?, updated_at = datetime('now') WHERE id = ?",
+        [costPrice, quantity, id]
+    )
 }
 
 export function deleteHolding(id: number) {
-    return db.prepare('DELETE FROM holdings WHERE id = ?').run(id)
+    run('DELETE FROM holdings WHERE id = ?', [id])
 }
 
 // Watchlist CRUD
 export function getAllWatchlist() {
-    return db.prepare('SELECT * FROM watchlist ORDER BY created_at DESC').all()
+    return all('SELECT * FROM watchlist ORDER BY created_at DESC')
 }
 
 export function addToWatchlist(code: string, name: string, note?: string) {
-    return db
-        .prepare('INSERT OR IGNORE INTO watchlist (code, name, note) VALUES (?, ?, ?)')
-        .run(code, name, note ?? '')
+    run('INSERT OR IGNORE INTO watchlist (code, name, note) VALUES (?, ?, ?)', [
+        code,
+        name,
+        note ?? '',
+    ])
 }
 
 export function removeFromWatchlist(id: number) {
-    return db.prepare('DELETE FROM watchlist WHERE id = ?').run(id)
+    run('DELETE FROM watchlist WHERE id = ?', [id])
 }
 
 // Settings
 export function getSetting(key: string): string | null {
-    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
-        | { value: string }
-        | undefined
+    const row = get<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])
     return row?.value ?? null
 }
 
 export function setSetting(key: string, value: string) {
-    return db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value)
+    run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value])
 }
 
 export interface InvestorProfile {
@@ -159,28 +258,24 @@ function mapInvestorProfile(row: {
 }
 
 export function getInvestorProfile(): InvestorProfile {
-    const row = db
-        .prepare(
-            'SELECT capital, risk_level, preferred_types, avoid_types, preferred_sectors, notes, updated_at FROM investor_profile WHERE id = 1'
-        )
-        .get() as
-        | {
-              capital: number | null
-              risk_level: string
-              preferred_types: string
-              avoid_types: string
-              preferred_sectors: string
-              notes: string
-              updated_at: string
-          }
-        | undefined
+    const row = get<{
+        capital: number | null
+        risk_level: string
+        preferred_types: string
+        avoid_types: string
+        preferred_sectors: string
+        notes: string
+        updated_at: string
+    }>(
+        'SELECT capital, risk_level, preferred_types, avoid_types, preferred_sectors, notes, updated_at FROM investor_profile WHERE id = 1'
+    )
 
     if (row) return mapInvestorProfile(row)
 
-    db.prepare(
+    run(
         `INSERT INTO investor_profile (id, capital, risk_level, preferred_types, avoid_types, preferred_sectors, notes)
     VALUES (1, 7000, '平衡', '宽基ETF、主板蓝筹', 'ST、北交所、高位追涨', '', '新手账户，优先控制仓位和回撤。')`
-    ).run()
+    )
     return getInvestorProfile()
 }
 
@@ -195,17 +290,18 @@ export function updateInvestorProfile(input: InvestorProfileInput): InvestorProf
         notes: input.notes ?? current.notes,
     }
 
-    db.prepare(
+    run(
         `UPDATE investor_profile
     SET capital = ?, risk_level = ?, preferred_types = ?, avoid_types = ?, preferred_sectors = ?, notes = ?, updated_at = datetime('now')
-    WHERE id = 1`
-    ).run(
-        next.capital,
-        next.riskLevel,
-        next.preferredTypes,
-        next.avoidTypes,
-        next.preferredSectors,
-        next.notes
+    WHERE id = 1`,
+        [
+            next.capital,
+            next.riskLevel,
+            next.preferredTypes,
+            next.avoidTypes,
+            next.preferredSectors,
+            next.notes,
+        ]
     )
 
     return getInvestorProfile()
@@ -234,13 +330,156 @@ export function formatInvestorProfileFull(profile: InvestorProfile): string {
 
 // AI analyses
 export function saveAnalysis(code: string, model: string, prompt: string, result: string) {
-    return db
-        .prepare('INSERT INTO ai_analyses (code, model, prompt, result) VALUES (?, ?, ?, ?)')
-        .run(code, model, prompt, result)
+    run('INSERT INTO ai_analyses (code, model, prompt, result) VALUES (?, ?, ?, ?)', [
+        code,
+        model,
+        prompt,
+        result,
+    ])
 }
 
 export function getAnalysesForStock(code: string) {
-    return db
-        .prepare('SELECT * FROM ai_analyses WHERE code = ? ORDER BY created_at DESC LIMIT 10')
-        .all(code)
+    return all('SELECT * FROM ai_analyses WHERE code = ? ORDER BY created_at DESC LIMIT 10', [code])
+}
+
+// ─── Chat sessions（UI 侧的会话列表） ─────────────────────────────────────────
+export interface ChatSessionRow {
+    id: string
+    title: string
+    created_at: string
+    updated_at: string
+}
+
+export function listChatSessions(): ChatSessionRow[] {
+    return all<ChatSessionRow>(
+        'SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC'
+    )
+}
+
+export function createChatSession(id: string, title: string): ChatSessionRow {
+    run('INSERT INTO chat_sessions (id, title) VALUES (?, ?)', [id, title])
+    return get<ChatSessionRow>(
+        'SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ?',
+        [id]
+    )!
+}
+
+export function renameChatSession(id: string, title: string): void {
+    run(
+        "UPDATE chat_sessions SET title = ?, updated_at = datetime('now') WHERE id = ?",
+        [title, id]
+    )
+}
+
+export function touchChatSession(id: string): void {
+    run("UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?", [id])
+}
+
+export function deleteChatSession(id: string): void {
+    // 事务性删掉四张表里的所有相关记录，最后统一 flush
+    runNoPersist('DELETE FROM chat_sessions WHERE id = ?', [id])
+    runNoPersist('DELETE FROM chat_messages WHERE session_id = ?', [id])
+    runNoPersist('DELETE FROM chat_checkpoints WHERE thread_id = ?', [id])
+    runNoPersist('DELETE FROM chat_writes WHERE thread_id = ?', [id])
+    flush()
+}
+
+// ─── Chat messages（UI 展示用） ───────────────────────────────────────────────
+export interface ChatMessageRow {
+    id: number
+    session_id: string
+    role: string
+    content: string
+    tool_calls: string | null
+    created_at: string
+}
+
+export function listChatMessages(sessionId: string): ChatMessageRow[] {
+    return all<ChatMessageRow>(
+        'SELECT id, session_id, role, content, tool_calls, created_at FROM chat_messages WHERE session_id = ? ORDER BY id ASC',
+        [sessionId]
+    )
+}
+
+export function appendChatMessage(
+    sessionId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    toolCalls?: unknown
+): void {
+    run(
+        'INSERT INTO chat_messages (session_id, role, content, tool_calls) VALUES (?, ?, ?, ?)',
+        [sessionId, role, content, toolCalls ? JSON.stringify(toolCalls) : null]
+    )
+}
+
+// ─── Chat checkpoints（LangGraph checkpointer 底层存储） ──────────────────────
+export interface CheckpointRow {
+    thread_id: string
+    checkpoint_ns: string
+    checkpoint_id: string
+    parent_id: string | null
+    checkpoint: Uint8Array
+    metadata: Uint8Array
+}
+
+export interface WriteRow {
+    thread_id: string
+    checkpoint_ns: string
+    checkpoint_id: string
+    task_id: string
+    idx: number
+    channel: string
+    value: Uint8Array
+}
+
+export function loadAllCheckpoints(): CheckpointRow[] {
+    return all<CheckpointRow>(
+        'SELECT thread_id, checkpoint_ns, checkpoint_id, parent_id, checkpoint, metadata FROM chat_checkpoints ORDER BY thread_id, checkpoint_ns, checkpoint_id'
+    )
+}
+
+export function loadAllWrites(): WriteRow[] {
+    return all<WriteRow>(
+        'SELECT thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, value FROM chat_writes'
+    )
+}
+
+export function upsertCheckpoint(row: CheckpointRow): void {
+    run(
+        `INSERT OR REPLACE INTO chat_checkpoints
+        (thread_id, checkpoint_ns, checkpoint_id, parent_id, checkpoint, metadata)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+            row.thread_id,
+            row.checkpoint_ns,
+            row.checkpoint_id,
+            row.parent_id,
+            row.checkpoint,
+            row.metadata,
+        ]
+    )
+}
+
+export function upsertWrite(row: WriteRow): void {
+    run(
+        `INSERT OR REPLACE INTO chat_writes
+        (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, value)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+            row.thread_id,
+            row.checkpoint_ns,
+            row.checkpoint_id,
+            row.task_id,
+            row.idx,
+            row.channel,
+            row.value,
+        ]
+    )
+}
+
+export function clearThreadState(threadId: string): void {
+    runNoPersist('DELETE FROM chat_checkpoints WHERE thread_id = ?', [threadId])
+    runNoPersist('DELETE FROM chat_writes WHERE thread_id = ?', [threadId])
+    flush()
 }

@@ -32,12 +32,16 @@ const api = {
             ipcRenderer.invoke('market:getKLine', code, days),
         getWeeklyKLine: (code: string, weeks: number = 60) =>
             ipcRenderer.invoke('market:getWeeklyKLine', code, weeks),
+        getMonthlyKLine: (code: string, months: number = 36) =>
+            ipcRenderer.invoke('market:getMonthlyKLine', code, months),
         getIntraday: (code: string, bars: number = 48) =>
             ipcRenderer.invoke('market:getIntraday', code, bars),
         getNews: (count?: number) => ipcRenderer.invoke('market:getNews', count),
         getTopSectors: (topN?: number) => ipcRenderer.invoke('market:getTopSectors', topN),
         getDynamicCandidates: (topSectorCount?: number, perSector?: number) =>
             ipcRenderer.invoke('market:getDynamicCandidates', topSectorCount, perSector),
+        getAmbushSectors: (limit?: number) =>
+            ipcRenderer.invoke('market:getAmbushSectors', limit),
         search: (keyword: string) => ipcRenderer.invoke('market:search', keyword),
         getSectorInfo: (code: string) => ipcRenderer.invoke('market:getSectorInfo', code),
         getSectorKLine: (bkCode: string, days?: number) =>
@@ -122,6 +126,15 @@ const api = {
             news: string[]
             date: string
             topSectors?: Array<{ name: string; changePercent: number }>
+            ambushSectors?: Array<{
+                name: string
+                changePercent: number
+                return5d: number
+                return10d: number
+                volumeTrend: number
+                distanceToHigh: number
+                reasons: string[]
+            }>
         }) => ipcRenderer.invoke('ai:marketContext', payload),
         agentDecision: (payload: {
             date: string
@@ -131,11 +144,10 @@ const api = {
         }) => ipcRenderer.invoke('ai:agentDecision', payload),
         chat: (payload: { messages: Array<{ role: string; content: string }> }) =>
             ipcRenderer.invoke('ai:chat', payload),
-        // 流式对话
-        chatStream: (
-            payload: { messages: Array<{ role: string; content: string }> },
-            requestId: string
-        ) => ipcRenderer.send('ai:chat:start', { ...payload, requestId }),
+        // 流式对话（Step 4：以 sessionId 为 thread_id，历史由 checkpointer 管理）
+        chatStream: (payload: { sessionId: string; input: string }, requestId: string) =>
+            ipcRenderer.send('ai:chat:start', { ...payload, requestId }),
+        chatStop: (requestId: string) => ipcRenderer.send('ai:chat:stop', { requestId }),
         onChatChunk: (
             cb: (data: { requestId: string; chunk: string }) => void
         ): (() => void) => {
@@ -144,9 +156,16 @@ const api = {
             return () => ipcRenderer.removeListener('ai:chat:chunk', handler)
         },
         onChatDone: (
-            cb: (data: { requestId: string; toolCalls: unknown[] }) => void
+            cb: (data: {
+                requestId: string
+                toolCalls: unknown[]
+                aborted?: boolean
+            }) => void
         ): (() => void) => {
-            const handler = (_e: Electron.IpcRendererEvent, data: { requestId: string; toolCalls: unknown[] }) => cb(data)
+            const handler = (
+                _e: Electron.IpcRendererEvent,
+                data: { requestId: string; toolCalls: unknown[]; aborted?: boolean }
+            ) => cb(data)
             ipcRenderer.on('ai:chat:done', handler)
             return () => ipcRenderer.removeListener('ai:chat:done', handler)
         },
@@ -157,6 +176,37 @@ const api = {
             ipcRenderer.on('ai:chat:error', handler)
             return () => ipcRenderer.removeListener('ai:chat:error', handler)
         },
+    },
+
+    // Chat sessions（多会话管理）
+    chat: {
+        listSessions: (): Promise<
+            Array<{ id: string; title: string; created_at: string; updated_at: string }>
+        > => ipcRenderer.invoke('chat:listSessions'),
+        createSession: (
+            title?: string
+        ): Promise<{ id: string; title: string; created_at: string; updated_at: string }> =>
+            ipcRenderer.invoke('chat:createSession', title),
+        renameSession: (id: string, title: string) =>
+            ipcRenderer.invoke('chat:renameSession', id, title),
+        deleteSession: (id: string): Promise<boolean> =>
+            ipcRenderer.invoke('chat:deleteSession', id),
+        getMessages: (
+            sessionId: string
+        ): Promise<
+            Array<{
+                id: number
+                session_id: string
+                role: string
+                content: string
+                tool_calls: string | null
+                created_at: string
+            }>
+        > => ipcRenderer.invoke('chat:getMessages', sessionId),
+        restoreFromCheckpoint: (
+            sessionId: string
+        ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> =>
+            ipcRenderer.invoke('chat:restoreFromCheckpoint', sessionId),
     },
 }
 

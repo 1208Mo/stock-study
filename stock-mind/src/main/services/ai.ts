@@ -1,4 +1,4 @@
-export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie'
+export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie' | 'volcengine'
 
 export interface AIMessage {
     role: 'system' | 'user' | 'assistant'
@@ -52,6 +52,7 @@ const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> 
     deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
     qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
     ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
+    volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
 }
 
 async function callOpenAICompatible(
@@ -395,7 +396,7 @@ export function buildDailyDecisionPrompt(
   现价 ${item.price}，今日 ${item.changePercent > 0 ? '+' : ''}${item.changePercent}%
   日内：开 ${item.open ?? 'N/A'}，高 ${item.high ?? 'N/A'}，低 ${item.low ?? 'N/A'}  ${distFromHigh}  ${distFromLow}
   量能：${volComment || 'N/A'}  ${openGap}
-  预算价位：激进 ${item.aggressiveEntry}，保守 ${item.conservativeEntry}，止损 ${item.stopLoss}，止盈 ${item.takeProfit}`
+  参考价位（基于日/周K线支撑压力位推导，非分时线）：激进 ${item.aggressiveEntry}，保守 ${item.conservativeEntry}，止损 ${item.stopLoss}，止盈 ${item.takeProfit}`
         })
         .join('\n\n')
 
@@ -415,7 +416,8 @@ export function buildDailyDecisionPrompt(
 3. 若候选池中所有标的处境类似（如都在高位、都缩量），直接说今天观望，不强行推荐。
 4. 仓位保守：单标的不超过可用资金20%，三个全买不超过50%。
 5. 止损是硬规定，跌破不补仓。
-6. 不追今日已大涨、接近日内高点的标的。`,
+6. 不追今日已大涨、接近日内高点的标的。
+7. 参考价位是"日/周K线静态技术位"（激进=MA5浅回踩，保守=MA10/MA20/周线12周低点，止损=MA60或月线主要低点，止盈=近20/60日swing高点及周线24周高点），一天只在收盘后刷新——直接引用即可，**不要再按现价系数重新计算**。`,
         },
         {
             role: 'user',
@@ -458,7 +460,16 @@ ${candidateLines || '（候选池为空）'}
 export function buildMarketContextPrompt(
     headlines: string[],
     date: string,
-    topSectors?: Array<{ name: string; changePercent: number }>
+    topSectors?: Array<{ name: string; changePercent: number }>,
+    ambushSectors?: Array<{
+        name: string
+        changePercent: number
+        return5d: number
+        return10d: number
+        volumeTrend: number
+        distanceToHigh: number
+        reasons: string[]
+    }>
 ): AIMessage[] {
     const headlineText = headlines
         .slice(0, 25)
@@ -475,13 +486,26 @@ export function buildMarketContextPrompt(
                   .join('\n')
             : ''
 
+    const ambushText =
+        ambushSectors && ambushSectors.length > 0
+            ? `\n潜伏候选板块（今日不热但有蓄势迹象，扫描全网100+板块得出）：\n` +
+              ambushSectors
+                  .map((s, i) => {
+                      const reason =
+                          s.reasons.length > 0 ? `，${s.reasons.join('、')}` : ''
+                      return `${i + 1}. ${s.name}：今日 ${s.changePercent >= 0 ? '+' : ''}${s.changePercent.toFixed(2)}%，5日 ${s.return5d >= 0 ? '+' : ''}${s.return5d}%，10日 ${s.return10d >= 0 ? '+' : ''}${s.return10d}%，量比 ${s.volumeTrend}x，距20日高 ${s.distanceToHigh}%${reason}`
+                  })
+                  .join('\n')
+            : ''
+
     return [
         {
             role: 'system',
-            content: `你是A股市场分析师，根据今日财经快讯，快速提炼出：
+            content: `你是A股市场分析师，根据今日财经快讯 + 板块数据（含"今日热点"与"潜伏候选"），快速提炼出：
 1. 今日市场主线板块（涨/强的方向）
 2. 今日回避方向（跌/弱的方向）
-3. 针对每个主线板块，推荐2-3只具体的A股代码（优先ETF，其次个股龙头）
+3. 潜伏机会板块（今日不热但已有蓄势迹象，可埋伏观察）
+4. 针对主线和潜伏方向，推荐2-3只具体的A股代码（优先ETF，其次个股龙头）
 
 输出格式简洁，直接给结论，不废话。`,
         },
@@ -492,6 +516,7 @@ export function buildMarketContextPrompt(
 今日东方财富财经快讯（共${headlines.length}条，取前25条）：
 ${headlineText}
 ${sectorText}
+${ambushText}
 
 请输出：
 
@@ -501,9 +526,12 @@ ${sectorText}
 **📉 今日回避方向**
 （哪些板块今日偏弱或有利空）
 
+**🕶️ 潜伏机会方向**
+（结合上方"潜伏候选板块"数据，挑2-3个最值得关注的埋伏方向，说明为什么）
+
 **🎯 今日推荐关注标的**
-按主线方向，每个方向给2-3个代码+名称，格式：
-- 方向名：代码1 名称1，代码2 名称2（说明理由，如"算力业绩兑现"）
+按方向给2-3个代码+名称，格式：
+- 方向名（主线/潜伏）：代码1 名称1，代码2 名称2（说明理由）
 
 **⚠️ 今日决策提示**
 （一句话总结：今天适合做什么，回避什么）`,

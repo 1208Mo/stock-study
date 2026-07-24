@@ -9,6 +9,7 @@ const THEMES: { id: string; label: string; sidebar: string; main: string; primar
     { id: 'blue', label: '海蓝', sidebar: '#080d18', main: '#0a0f1e', primary: '#38bdf8' },
     { id: 'green', label: '暗绿', sidebar: '#081008', main: '#0a1209', primary: '#4ade80' },
     { id: 'purple', label: '暗紫', sidebar: '#0b0814', main: '#0e0a1a', primary: '#a78bfa' },
+    { id: 'eyecare', label: '护眼', sidebar: '#b8e2be', main: '#c7edcc', primary: '#3f7a55' },
 ]
 
 function applyTheme(themeId: string) {
@@ -51,6 +52,13 @@ const PROVIDERS: {
         defaultModel: 'ernie-4.5-8k-preview',
         docsUrl: 'https://qianfan.cloud.baidu.com/mkl',
     },
+    {
+        id: 'volcengine',
+        label: '火山引擎',
+        keyPlaceholder: 'ark-...',
+        defaultModel: '（填入接入点ID）',
+        docsUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/endpoint',
+    },
 ]
 
 const EMPTY_PROFILE: InvestorProfile = {
@@ -82,23 +90,27 @@ export default function Settings() {
     const [saving, setSaving] = useState(false)
     const [saveError, setSaveError] = useState('')
     const [localProvider, setLocalProvider] = useState<AIProvider>(aiProvider)
+    const [expandedProvider, setExpandedProvider] = useState<AIProvider>(aiProvider)
     const [localKeys, setLocalKeys] = useState<Record<AIProvider, string>>({
         openai: '',
         deepseek: '',
         qwen: '',
         ernie: '',
+        volcengine: '',
     })
     const [localModels, setLocalModels] = useState<Record<AIProvider, string>>({
         openai: '',
         deepseek: '',
         qwen: '',
         ernie: '',
+        volcengine: '',
     })
     const [localBaseUrls, setLocalBaseUrls] = useState<Record<AIProvider, string>>({
         openai: '',
         deepseek: '',
         qwen: '',
         ernie: '',
+        volcengine: '',
     })
     const [localThreshold, setLocalThreshold] = useState(5)
     const [currentTheme, setCurrentTheme] = useState(() => localStorage.getItem('theme') || 'dark')
@@ -107,6 +119,7 @@ export default function Settings() {
         deepseek: false,
         qwen: false,
         ernie: false,
+        volcengine: false,
     })
     const [profile, setProfile] = useState<InvestorProfile>(EMPTY_PROFILE)
     const [profileSaving, setProfileSaving] = useState(false)
@@ -120,6 +133,7 @@ export default function Settings() {
 
     useEffect(() => {
         setLocalProvider(aiProvider)
+        setExpandedProvider(aiProvider)
         setLocalKeys(apiKeys)
         setLocalModels(aiModels)
         setLocalBaseUrls(aiBaseUrls)
@@ -217,107 +231,138 @@ export default function Settings() {
 
             {/* AI 模型 */}
             <section className="settings-section">
-                <h2>AI 模型</h2>
+                <div className="settings-section-header">
+                    <h2>AI 模型</h2>
+                    <span className="current-provider-hint">
+                        当前使用：
+                        <strong>
+                            {PROVIDERS.find((p) => p.id === localProvider)?.label ?? localProvider}
+                        </strong>
+                        {(localModels[localProvider] ||
+                            PROVIDERS.find((p) => p.id === localProvider)?.defaultModel) && (
+                            <span className="current-provider-model">
+                                {' / '}
+                                {localModels[localProvider] ||
+                                    PROVIDERS.find((p) => p.id === localProvider)?.defaultModel}
+                            </span>
+                        )}
+                    </span>
+                </div>
                 <p className="settings-note">
-                    点击卡片选择当前使用的模型，展开后填入 API Key 保存即可。Key 仅存储在本地。
+                    点击卡片展开配置，点击"使用此模型"切换生效的模型。Key 仅存储在本地。
                 </p>
 
-                <div className="provider-grid">
+                <div className="provider-list">
                     {PROVIDERS.map((p) => {
                         const isActive = localProvider === p.id
+                        const isExpanded = expandedProvider === p.id
                         const hasKey = localKeys[p.id].trim().length > 0
                         return (
-                            <div
-                                key={p.id}
-                                className={`provider-card2 ${isActive ? 'active' : ''}`}
-                                onClick={() => setLocalProvider(p.id)}
-                            >
-                                <div className="provider-card2-header">
-                                    <div className="provider-card2-title">
-                                        {isActive && <span className="provider-active-dot" />}
+                            <div key={p.id} className={`provider-item ${isExpanded ? 'expanded' : ''} ${isActive ? 'active' : ''}`}>
+                                {/* 卡片头部：点击展开/收起配置 */}
+                                <div
+                                    className="provider-item-header"
+                                    onClick={() =>
+                                        setExpandedProvider(isExpanded ? ('' as AIProvider) : p.id)
+                                    }
+                                >
+                                    <div className="provider-item-left">
                                         <span className="provider-card-name">{p.label}</span>
+                                        <span className="provider-item-model">
+                                            {localModels[p.id] || p.defaultModel}
+                                        </span>
                                     </div>
-                                    <span
-                                        className={`provider-key-status ${hasKey ? 'configured' : 'empty'}`}
-                                    >
-                                        {hasKey ? '✓ 已配置' : '未配置'}
-                                    </span>
+                                    <div className="provider-item-right">
+                                        {isActive ? (
+                                            <span className="provider-badge-active">使用中</span>
+                                        ) : (
+                                            <button
+                                                className="btn-use-provider"
+                                                onClick={(e) => {
+                                                    e.stopPropagation()
+                                                    setLocalProvider(p.id)
+                                                    setExpandedProvider(p.id)
+                                                }}
+                                            >
+                                                使用此模型
+                                            </button>
+                                        )}
+                                        <span
+                                            className={`provider-key-status ${hasKey ? 'configured' : 'empty'}`}
+                                        >
+                                            {hasKey ? '✓ 已配置' : '未配置'}
+                                        </span>
+                                        <span className="provider-expand-icon">
+                                            {isExpanded ? '▲' : '▼'}
+                                        </span>
+                                    </div>
                                 </div>
-                                <div className="provider-card2-model">
-                                    {localModels[p.id] || p.defaultModel}
-                                </div>
+
+                                {/* 展开的配置字段 */}
+                                {isExpanded && (
+                                    <div className="provider-item-fields">
+                                        <div className="provider-field-row">
+                                            <label>API Key</label>
+                                            <div className="input-with-toggle">
+                                                <input
+                                                    className="input"
+                                                    type={showKey[p.id] ? 'text' : 'password'}
+                                                    placeholder={p.keyPlaceholder}
+                                                    value={localKeys[p.id]}
+                                                    onChange={(e) =>
+                                                        setLocalKeys({
+                                                            ...localKeys,
+                                                            [p.id]: e.target.value,
+                                                        })
+                                                    }
+                                                />
+                                                <button
+                                                    className="btn-toggle-key"
+                                                    onClick={() =>
+                                                        setShowKey({
+                                                            ...showKey,
+                                                            [p.id]: !showKey[p.id],
+                                                        })
+                                                    }
+                                                >
+                                                    {showKey[p.id] ? '隐藏' : '显示'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="provider-field-row">
+                                            <label>模型名</label>
+                                            <input
+                                                className="input"
+                                                placeholder={`默认：${p.defaultModel}`}
+                                                value={localModels[p.id]}
+                                                onChange={(e) =>
+                                                    setLocalModels({
+                                                        ...localModels,
+                                                        [p.id]: e.target.value,
+                                                    })
+                                                }
+                                            />
+                                        </div>
+                                        <div className="provider-field-row">
+                                            <label>接口地址</label>
+                                            <input
+                                                className="input"
+                                                placeholder="留空使用默认地址（兼容 OpenAI 格式）"
+                                                value={localBaseUrls[p.id]}
+                                                onChange={(e) =>
+                                                    setLocalBaseUrls({
+                                                        ...localBaseUrls,
+                                                        [p.id]: e.target.value,
+                                                    })
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )
                     })}
                 </div>
-
-                {/* 当前选中 provider 的配置字段 */}
-                {(() => {
-                    const p = PROVIDERS.find((x) => x.id === localProvider)!
-                    return (
-                        <div className="provider-fields-panel">
-                            <div className="provider-fields-title">配置 {p.label}</div>
-                            <div className="provider-card-fields">
-                                <div className="provider-field-row">
-                                    <label>API Key</label>
-                                    <div className="input-with-toggle">
-                                        <input
-                                            className="input"
-                                            type={showKey[p.id] ? 'text' : 'password'}
-                                            placeholder={p.keyPlaceholder}
-                                            value={localKeys[p.id]}
-                                            onChange={(e) =>
-                                                setLocalKeys({
-                                                    ...localKeys,
-                                                    [p.id]: e.target.value,
-                                                })
-                                            }
-                                        />
-                                        <button
-                                            className="btn-toggle-key"
-                                            onClick={() =>
-                                                setShowKey({
-                                                    ...showKey,
-                                                    [p.id]: !showKey[p.id],
-                                                })
-                                            }
-                                        >
-                                            {showKey[p.id] ? '隐藏' : '显示'}
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className="provider-field-row">
-                                    <label>模型名</label>
-                                    <input
-                                        className="input"
-                                        placeholder={`默认：${p.defaultModel}`}
-                                        value={localModels[p.id]}
-                                        onChange={(e) =>
-                                            setLocalModels({
-                                                ...localModels,
-                                                [p.id]: e.target.value,
-                                            })
-                                        }
-                                    />
-                                </div>
-                                <div className="provider-field-row">
-                                    <label>接口地址</label>
-                                    <input
-                                        className="input"
-                                        placeholder="留空使用默认地址（兼容 OpenAI 格式）"
-                                        value={localBaseUrls[p.id]}
-                                        onChange={(e) =>
-                                            setLocalBaseUrls({
-                                                ...localBaseUrls,
-                                                [p.id]: e.target.value,
-                                            })
-                                        }
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    )
-                })()}
             </section>
 
             {/* 异动提醒阈值 */}

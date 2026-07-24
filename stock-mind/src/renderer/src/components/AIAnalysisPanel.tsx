@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 interface Props {
     content: string
@@ -20,7 +21,7 @@ export default function AIAnalysisPanel({ content, isLatest, createdAt, model }:
                 {formattedTime && <span className="analysis-time">{formattedTime}</span>}
             </div>
             <div className="analysis-content markdown-body">
-                <ReactMarkdown>{content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
             </div>
             <p className="analysis-disclaimer">仅供参考，不构成投资建议</p>
         </div>

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie'
+export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie' | 'volcengine'
 
 interface SettingsState {
     aiProvider: AIProvider
@@ -19,9 +19,9 @@ interface SettingsState {
 
 export const useSettingsStore = create<SettingsState>((set) => ({
     aiProvider: 'deepseek',
-    apiKeys: { openai: '', deepseek: '', qwen: '', ernie: '' },
-    aiModels: { openai: '', deepseek: '', qwen: '', ernie: '' },
-    aiBaseUrls: { openai: '', deepseek: '', qwen: '', ernie: '' },
+    apiKeys: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '' },
+    aiModels: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '' },
+    aiBaseUrls: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '' },
     alertThreshold: 5,
     loaded: false,
 
@@ -35,18 +35,21 @@ export const useSettingsStore = create<SettingsState>((set) => ({
                 deepseek: '',
                 qwen: '',
                 ernie: '',
+                volcengine: '',
             }
             const models: Record<AIProvider, string> = {
                 openai: '',
                 deepseek: '',
                 qwen: '',
                 ernie: '',
+                volcengine: '',
             }
             const baseUrls: Record<AIProvider, string> = {
                 openai: '',
                 deepseek: '',
                 qwen: '',
                 ernie: '',
+                volcengine: '',
             }
             for (const p of Object.keys(keys) as AIProvider[]) {
                 keys[p] = (await window.api.settings.get(`ai_key_${p}`)) ?? ''

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { KLineData, Holding, DividendRecord } from '../types'
 import KLineChart from '../components/KLineChart'
 import BuyAdvicePanel from '../components/BuyAdvicePanel'
@@ -20,6 +21,10 @@ export default function StockDetail() {
     const [klineData, setKlineData] = useState<KLineData[]>([])
     const [klineMode, setKlineMode] = useState<KLineMode>('day')
     const [klineDays, setKlineDays] = useState(60)
+    // 用于买卖价位推导的多周期K线（与图表选中的周期解耦）
+    const [dailyContextKlines, setDailyContextKlines] = useState<KLineData[]>([])
+    const [weeklyContextKlines, setWeeklyContextKlines] = useState<KLineData[]>([])
+    const [monthlyContextKlines, setMonthlyContextKlines] = useState<KLineData[]>([])
     const [quote, setQuote] = useState<{
         price: number
         changePercent: number
@@ -69,6 +74,25 @@ export default function StockDetail() {
         if (!code) return
         loadData()
     }, [code, klineMode, klineDays])
+
+    // 每次换股：拉一次多周期K线作为买卖价位推导的固定上下文
+    useEffect(() => {
+        if (!code) return
+        let cancelled = false
+        Promise.allSettled([
+            window.api.market.getKLine(code, 90),
+            window.api.market.getWeeklyKLine(code, 60),
+            window.api.market.getMonthlyKLine(code, 36),
+        ]).then((results) => {
+            if (cancelled) return
+            if (results[0].status === 'fulfilled') setDailyContextKlines(results[0].value)
+            if (results[1].status === 'fulfilled') setWeeklyContextKlines(results[1].value)
+            if (results[2].status === 'fulfilled') setMonthlyContextKlines(results[2].value)
+        })
+        return () => {
+            cancelled = true
+        }
+    }, [code])
 
     async function loadData() {
         if (!code) return
@@ -271,7 +295,7 @@ export default function StockDetail() {
                             >
                                 复制
                             </button>
-                            <ReactMarkdown>{klineReading}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{klineReading}</ReactMarkdown>
                         </div>
                     )}
                     {!klineReading && !klineReadLoading && !klineReadError && (
@@ -312,7 +336,7 @@ export default function StockDetail() {
                         >
                             复制
                         </button>
-                        <ReactMarkdown>{tradingTResult}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{tradingTResult}</ReactMarkdown>
                     </div>
                 )}
                 {!tradingTResult && !tradingTLoading && !tradingTError && (
@@ -325,7 +349,15 @@ export default function StockDetail() {
                 )}
             </div>
 
-            {quote && <BuyAdvicePanel price={quote.price} changePercent={quote.changePercent} />}
+            {quote && (
+                <BuyAdvicePanel
+                    price={quote.price}
+                    changePercent={quote.changePercent}
+                    dailyKlines={dailyContextKlines}
+                    weeklyKlines={weeklyContextKlines}
+                    monthlyKlines={monthlyContextKlines}
+                />
+            )}
 
             {dividends.length > 0 && (
                 <div className="kline-ai-section">

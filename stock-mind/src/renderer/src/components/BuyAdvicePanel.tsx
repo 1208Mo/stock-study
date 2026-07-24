@@ -1,27 +1,46 @@
+import type { KLineData } from '../types'
+import { computePriceLevels } from '../utils/priceLevels'
+
 interface Props {
     price: number
     changePercent: number
+    dailyKlines?: KLineData[]
+    weeklyKlines?: KLineData[]
+    monthlyKlines?: KLineData[]
 }
 
 function fmt(p: number) {
     return p >= 10 ? p.toFixed(2) : p.toFixed(3)
 }
 
-export default function BuyAdvicePanel({ price, changePercent }: Props) {
+export default function BuyAdvicePanel({
+    price,
+    changePercent,
+    dailyKlines,
+    weeklyKlines,
+    monthlyKlines,
+}: Props) {
     const isEtf = price < 20
     const isNearLimitDown = changePercent <= -8
     const isNearLimitUp = changePercent >= 8
     const isExtended = isEtf ? changePercent >= 2.5 : changePercent >= 4
 
-    const aggressiveEntry = price * (isEtf ? 0.995 : 0.99)
-    const conservativeEntry = price * (isEtf ? 0.985 : 0.975)
-    const stopLoss = price * (isEtf ? 0.97 : 0.963)
-    const takeProfit1 = price * (isEtf ? 1.025 : 1.04)
-    const takeProfit2 = price * (isEtf ? 1.05 : 1.08)
+    const plan = computePriceLevels(price, isEtf, dailyKlines, weeklyKlines, monthlyKlines)
 
     return (
         <div className="buy-advice-panel">
-            <h3 className="buy-advice-title">📌 傻瓜价位参考</h3>
+            <h3 className="buy-advice-title">
+                📌 傻瓜价位参考
+                <span className="buy-advice-basis-tag">
+                    {plan.basis === 'kline'
+                        ? '基于日/周/月K线静态技术位（不随现价跳动）'
+                        : '基于现价比例（K线未加载）'}
+                </span>
+            </h3>
+
+            {plan.positionHint && (
+                <div className="buy-advice-position-hint">💡 {plan.positionHint}</div>
+            )}
 
             {isNearLimitDown ? (
                 <div className="buy-advice-skip">
@@ -42,36 +61,30 @@ export default function BuyAdvicePanel({ price, changePercent }: Props) {
                     <div className="buy-advice-grid">
                         <div className="advice-item">
                             <span className="advice-label">激进挂单</span>
-                            <span className="advice-value up">¥ {fmt(aggressiveEntry)}</span>
-                            <span className="advice-desc">
-                                现价 × {isEtf ? '0.995' : '0.990'}，小仓试错
-                            </span>
+                            <span className="advice-value up">¥ {fmt(plan.aggressiveEntry)}</span>
+                            <span className="advice-desc">{plan.notes.aggressive}</span>
                         </div>
                         <div className="advice-item">
                             <span className="advice-label">保守挂单</span>
-                            <span className="advice-value up">¥ {fmt(conservativeEntry)}</span>
-                            <span className="advice-desc">
-                                现价 × {isEtf ? '0.985' : '0.975'}，等明显回踩
+                            <span className="advice-value up">
+                                ¥ {fmt(plan.conservativeEntry)}
                             </span>
+                            <span className="advice-desc">{plan.notes.conservative}</span>
                         </div>
                         <div className="advice-item">
                             <span className="advice-label">止损线</span>
-                            <span className="advice-value down">¥ {fmt(stopLoss)}</span>
-                            <span className="advice-desc">跌破此价不补仓，直接出</span>
+                            <span className="advice-value down">¥ {fmt(plan.stopLoss)}</span>
+                            <span className="advice-desc">{plan.notes.stop}</span>
                         </div>
                         <div className="advice-item">
                             <span className="advice-label">第一止盈</span>
-                            <span className="advice-value up">¥ {fmt(takeProfit1)}</span>
-                            <span className="advice-desc">
-                                现价 × {isEtf ? '1.025' : '1.040'}，可减半仓
-                            </span>
+                            <span className="advice-value up">¥ {fmt(plan.takeProfit1)}</span>
+                            <span className="advice-desc">{plan.notes.tp1}</span>
                         </div>
                         <div className="advice-item">
                             <span className="advice-label">第二止盈</span>
-                            <span className="advice-value up">¥ {fmt(takeProfit2)}</span>
-                            <span className="advice-desc">
-                                现价 × {isEtf ? '1.050' : '1.080'}，强势才持到
-                            </span>
+                            <span className="advice-value up">¥ {fmt(plan.takeProfit2)}</span>
+                            <span className="advice-desc">{plan.notes.tp2}</span>
                         </div>
                     </div>
                     <div className="buy-advice-rules">
@@ -79,7 +92,9 @@ export default function BuyAdvicePanel({ price, changePercent }: Props) {
                         涨幅超过 {isEtf ? '2.5' : '4'}% 不追 · 接近日内高点不追 · 板块整体转弱不买
                     </div>
                     <div className="buy-advice-note">
-                        以上基于当前报价自动计算，不构成投资建议。实际操作以交易软件实时价为准。
+                        {plan.basis === 'kline'
+                            ? '价位全部来自日/周/月K线的静态技术位（MA5/MA10/MA20/MA60、20日swing高低点、周线12周低点、月线24月主要低点），一天只在收盘后刷新，日内不会跟现价跳动。不构成投资建议。'
+                            : '以上按现价比例临时估算，会随现价跳动。切换到"日K"周期加载K线后会按静态技术位重算。'}
                     </div>
                 </>
             )}

@@ -34,12 +34,12 @@ function createWindow(): void {
     }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
     if (process.platform === 'win32') {
         app.setAppUserModelId('com.stockmind.app')
     }
 
-    initDatabase()
+    await initDatabase()
     registerAllIpcHandlers()
     startScheduler()
     createWindow()

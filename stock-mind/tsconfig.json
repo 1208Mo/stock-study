@@ -15,7 +15,8 @@
         "noEmit": false,
         "outDir": "out",
         "paths": {
-            "@renderer/*": ["src/renderer/src/*"]
+            "@renderer/*": ["src/renderer/src/*"],
+            "@langchain/langgraph/prebuilt": ["node_modules/@langchain/langgraph/dist/prebuilt/index.d.ts"]
         }
     },
     "include": ["src/main", "src/preload"],

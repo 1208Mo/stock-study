@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "building-ai-chat": {
+      "source": "ancoleman/ai-design-components",
+      "sourceType": "github",
+      "computedHash": "f7b3c094af380b9c3cadb5a7ffad0c0c0732304e86880217acd497a29359c52d"
+    },
+    "ui-design-aesthetics": {
+      "source": "nickcrew/claude-ctx-plugin",
+      "sourceType": "github",
+      "computedHash": "c0f50b547dcd4cb969c3787b0e4c4e5fb47396cbf2f4e745aeb4bc8f59b60c68"
+    }
+  }
+}

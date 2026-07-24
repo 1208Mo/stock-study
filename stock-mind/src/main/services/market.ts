@@ -233,6 +233,76 @@ export async function fetchWeeklyKLine(code: string, weeks: number = 60): Promis
     }))
 }
 
+// 月K线（用于长期支撑/压力判断）
+// 优先用东方财富 klt=103（月线），失败再退到新浪 scale=7200
+export async function fetchMonthlyKLine(code: string, months: number = 36): Promise<KLineData[]> {
+    const normalizedCode = code.trim()
+    // 东方财富月线
+    try {
+        const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
+        const params = {
+            secid: getSecid(normalizedCode),
+            fields1: 'f1,f2,f3,f4,f5,f6',
+            fields2: 'f51,f52,f53,f54,f55,f56,f57,f58',
+            klt: 103,
+            fqt: 1,
+            beg: 0,
+            end: 20500101,
+            lmt: months,
+            ut: 'bd1d9ddb04089700cf9c27f6f7426281',
+        }
+        const resp = await axios.get(url, {
+            params,
+            timeout: 8000,
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                Referer: 'https://quote.eastmoney.com/',
+            },
+        })
+        const klines: string[] = resp.data?.data?.klines ?? []
+        if (klines.length > 0) {
+            return klines.map((line) => {
+                const [date, open, close, high, low, volume] = line.split(',')
+                return {
+                    date,
+                    open: parseFloat(open),
+                    close: parseFloat(close),
+                    high: parseFloat(high),
+                    low: parseFloat(low),
+                    volume: parseFloat(volume),
+                }
+            })
+        }
+    } catch {
+        // fallthrough to sina
+    }
+    // 新浪月线
+    const symbol = getSinaSymbol(normalizedCode)
+    const url = `https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData`
+    const params = { symbol, scale: 7200, datalen: months, ma: 'no' }
+    const resp = await axios.get(url, { params, timeout: 8000 })
+    const list: Array<{
+        day: string
+        open: string
+        high: string
+        low: string
+        close: string
+        volume: string
+    }> = resp.data ?? []
+    if (!Array.isArray(list) || list.length === 0) {
+        throw new Error(`月K数据为空：${normalizedCode}`)
+    }
+    return list.map((item) => ({
+        date: item.day,
+        open: parseFloat(item.open),
+        close: parseFloat(item.close),
+        high: parseFloat(item.high),
+        low: parseFloat(item.low),
+        volume: parseFloat(item.volume),
+    }))
+}
+
 // 东方财富快讯（用于 AI 分析今日市场热点）
 export async function fetchMarketNews(count: number = 20): Promise<string[]> {
     const url = `https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_1_${count}_.html`
@@ -262,12 +332,27 @@ export async function fetchSectorInfo(code: string): Promise<StockSectorInfo> {
         fields: 'f127,f136',
         ut: 'bd1d9ddb04089700cf9c27f6f7426281',
     }
-    const resp = await axios.get(url, { params, timeout: 5000 })
-    const d = resp.data?.data ?? {}
-    return {
-        sector: d.f127 || '',
-        subSector: d.f136 || '',
+    const headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Referer: 'https://quote.eastmoney.com/',
     }
+
+    let lastErr: unknown
+    for (let i = 0; i < 3; i++) {
+        try {
+            const resp = await axios.get(url, { params, timeout: 8000, headers })
+            const d = resp.data?.data ?? {}
+            return {
+                sector: d.f127 || '',
+                subSector: d.f136 || '',
+            }
+        } catch (err) {
+            lastErr = err
+            if (i < 2) await new Promise((r) => setTimeout(r, 500 * (i + 1)))
+        }
+    }
+    throw lastErr
 }
 
 // 东方财富分红数据（近几年分红记录）
@@ -321,16 +406,25 @@ export async function fetchTopSectors(
     const base = 'https://push2.eastmoney.com/api/qt/clist/get'
     const qs = `pn=1&pz=${topN}&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14,f3`
 
-    const resp = await axios.get(`${base}?${qs}`, {
-        timeout: 6000,
-        headers: { Referer: 'https://quote.eastmoney.com/' },
-    })
-    const list: Array<{ f12: string; f14: string; f3: number }> = resp.data?.data?.diff ?? []
-    return list.map((item) => ({
-        code: item.f12,
-        name: item.f14,
-        changePercent: item.f3 / 100,
-    }))
+    let lastErr: unknown
+    for (let i = 0; i < 3; i++) {
+        try {
+            const resp = await axios.get(`${base}?${qs}`, {
+                timeout: 6000,
+                headers: { Referer: 'https://quote.eastmoney.com/' },
+            })
+            const list: Array<{ f12: string; f14: string; f3: number }> = resp.data?.data?.diff ?? []
+            return list.map((item) => ({
+                code: item.f12,
+                name: item.f14,
+                changePercent: item.f3 / 100,
+            }))
+        } catch (err) {
+            lastErr = err
+            if (i < 2) await new Promise((r) => setTimeout(r, 800 * (i + 1)))
+        }
+    }
+    throw lastErr
 }
 
 export async function searchStock(keyword: string): Promise<{ code: string; name: string }[]> {
@@ -370,19 +464,33 @@ export async function fetchSectorKLine(bkCode: string, days: number = 7): Promis
         lmt: days,
         ut: 'bd1d9ddb04089700cf9c27f6f7426281',
     }
-    const resp = await axios.get(url, { params, timeout: 6000 })
-    const klines: string[] = resp.data?.data?.klines ?? []
-    return klines.map((line) => {
-        const [date, open, close, high, low, volume] = line.split(',')
-        return {
-            date,
-            open: parseFloat(open),
-            close: parseFloat(close),
-            high: parseFloat(high),
-            low: parseFloat(low),
-            volume: parseFloat(volume),
+    const emHeaders = {
+        'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Referer: 'https://quote.eastmoney.com/',
+    }
+    let lastErr: unknown
+    for (let i = 0; i < 3; i++) {
+        try {
+            const resp = await axios.get(url, { params, timeout: 8000, headers: emHeaders })
+            const klines: string[] = resp.data?.data?.klines ?? []
+            return klines.map((line) => {
+                const [date, open, close, high, low, volume] = line.split(',')
+                return {
+                    date,
+                    open: parseFloat(open),
+                    close: parseFloat(close),
+                    high: parseFloat(high),
+                    low: parseFloat(low),
+                    volume: parseFloat(volume),
+                }
+            })
+        } catch (err) {
+            lastErr = err
+            if (i < 2) await new Promise((r) => setTimeout(r, 500 * (i + 1)))
         }
-    })
+    }
+    throw lastErr
 }
 /**
  * 拉取某板块内今日涨幅前 topN 的个股
@@ -417,6 +525,133 @@ export async function fetchSectorTopStocks(
         name: s.f14,
         changePercent: s.f3 / 100,
     }))
+}
+
+// ─── 潜伏板块识别 ────────────────────────────────────────────────────────
+// 收集全网板块行情 + K线特征，找出"今日没爆发但趋势健康、量能温和放大"的埋伏候选
+export interface AmbushSector {
+    code: string
+    name: string
+    changePercent: number // 今日涨跌幅
+    return5d: number // 近5日涨跌幅（收盘）
+    return10d: number // 近10日涨跌幅
+    volumeTrend: number // 近3日均量 / 前3日均量
+    consolidation: number // 近5日高低差 / 均价，越小越紧
+    distanceToHigh: number // 距离20日高点百分比（正=下方，接近0=临近突破）
+    score: number
+    reasons: string[]
+}
+
+// 获取全部行业板块（前 100 即接近全量）
+export async function fetchAllSectors(
+    topN: number = 100
+): Promise<Array<{ name: string; changePercent: number; code: string }>> {
+    return fetchTopSectors(topN)
+}
+
+export async function fetchAmbushSectors(limit: number = 8): Promise<AmbushSector[]> {
+    // 1) 拉全部板块（按涨幅排序）
+    const all = await fetchAllSectors(100)
+    if (all.length === 0) return []
+
+    // 2) 剔除今日过热（>2.5%）和过冷（<-1.5%）的板块，剩下的做埋伏候选
+    const candidates = all.filter(
+        (s) => s.changePercent >= -1.5 && s.changePercent <= 2.5
+    )
+    if (candidates.length === 0) return []
+
+    // 3) 并发拉 20 日K线，个别失败不影响整体
+    const withKline = await Promise.allSettled(
+        candidates.map(async (s) => {
+            const klines = await fetchSectorKLine(s.code, 20)
+            return { sector: s, klines }
+        })
+    )
+
+    // 4) 计算特征 + 打分
+    const scored: AmbushSector[] = []
+    for (const item of withKline) {
+        if (item.status !== 'fulfilled') continue
+        const { sector, klines } = item.value
+        if (!klines || klines.length < 6) continue
+        const closes = klines.map((k) => k.close)
+        const highs = klines.map((k) => k.high)
+        const vols = klines.map((k) => k.volume)
+        const last = closes[closes.length - 1]
+        if (!last) continue
+
+        // 近5日/10日涨跌
+        const close5 = closes[closes.length - 6] ?? closes[0]
+        const close10 = closes[Math.max(0, closes.length - 11)] ?? closes[0]
+        const return5d = ((last - close5) / close5) * 100
+        const return10d = ((last - close10) / close10) * 100
+
+        // 量能：近3日均量 / 前3日均量
+        const recentVol = vols.slice(-3).reduce((a, b) => a + b, 0) / 3
+        const priorVol = vols.slice(-6, -3).reduce((a, b) => a + b, 0) / 3 || recentVol
+        const volumeTrend = priorVol > 0 ? recentVol / priorVol : 1
+
+        // 近5日高低差
+        const recent5 = klines.slice(-5)
+        const hi5 = Math.max(...recent5.map((k) => k.high))
+        const lo5 = Math.min(...recent5.map((k) => k.low))
+        const avg5 = recent5.reduce((a, b) => a + b.close, 0) / recent5.length
+        const consolidation = avg5 > 0 ? ((hi5 - lo5) / avg5) * 100 : 100
+
+        // 距离20日高点
+        const hi20 = Math.max(...highs)
+        const distanceToHigh = hi20 > 0 ? ((hi20 - last) / hi20) * 100 : 100
+
+        // 打分：温和上涨 + 量能温和放大 + 相对紧凑 + 接近前高
+        let score = 0
+        const reasons: string[] = []
+        if (return5d >= 0 && return5d <= 6) {
+            score += 20
+            reasons.push(`近5日温和上涨 ${return5d.toFixed(2)}%`)
+        } else if (return5d > 6) {
+            score -= 10
+        }
+        if (return10d >= 0 && return10d <= 12) {
+            score += 10
+        }
+        if (volumeTrend >= 1.1 && volumeTrend <= 2.5) {
+            score += 20
+            reasons.push(`量能温和放大 ${volumeTrend.toFixed(2)}x`)
+        } else if (volumeTrend > 2.5) {
+            score -= 5 // 过度放量往往意味着已启动
+        }
+        if (consolidation <= 5) {
+            score += 15
+            reasons.push(`近5日窄幅整理（${consolidation.toFixed(2)}%）`)
+        }
+        if (distanceToHigh >= 0 && distanceToHigh <= 4) {
+            score += 20
+            reasons.push(`距20日高点仅 ${distanceToHigh.toFixed(2)}%`)
+        } else if (distanceToHigh <= 8) {
+            score += 8
+        }
+        // 今日相对表现：小阳 > 平 > 微跌
+        if (sector.changePercent >= 0 && sector.changePercent <= 1.5) {
+            score += 8
+        }
+        if (score <= 0) continue
+
+        scored.push({
+            code: sector.code,
+            name: sector.name,
+            changePercent: sector.changePercent,
+            return5d: Number(return5d.toFixed(2)),
+            return10d: Number(return10d.toFixed(2)),
+            volumeTrend: Number(volumeTrend.toFixed(2)),
+            consolidation: Number(consolidation.toFixed(2)),
+            distanceToHigh: Number(distanceToHigh.toFixed(2)),
+            score,
+            reasons,
+        })
+    }
+
+    scored.sort((a, b) => b.score - a.score)
+    return scored.slice(0, limit)
 }
 
 /**

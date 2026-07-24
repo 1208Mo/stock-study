@@ -1,4 +1,5 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
+import { randomUUID } from 'crypto'
 import {
     getAllHoldings,
     addHolding,
@@ -15,16 +16,25 @@ import {
     formatInvestorProfileFull,
     saveAnalysis,
     getAnalysesForStock,
+    listChatSessions,
+    createChatSession,
+    renameChatSession,
+    touchChatSession,
+    deleteChatSession,
+    listChatMessages,
+    appendChatMessage,
 } from '../db'
 import {
     fetchQuote,
     fetchBatchQuotes,
     fetchKLine,
     fetchWeeklyKLine,
+    fetchMonthlyKLine,
     fetchIntraday,
     fetchMarketNews,
     fetchTopSectors,
     fetchDynamicCandidates,
+    fetchAmbushSectors,
     fetchSectorInfo,
     fetchSectorKLine,
     fetchDividends,
@@ -40,23 +50,17 @@ import {
     AIProvider,
 } from '../services/ai'
 import { runDecisionAgent } from '../services/agent'
-import { runResearchAgent } from '../services/researchAgent'
+import { runResearchAgent, getSessionMessagesFromCheckpoint } from '../services/researchAgent'
 
 function getConfiguredAI() {
-    const preferred = (getSetting('ai_provider') ?? 'deepseek') as AIProvider
-    const fallbackOrder: AIProvider[] = [preferred, 'ernie', 'qwen', 'deepseek', 'openai']
-    const providers = Array.from(new Set(fallbackOrder))
-
-    for (const provider of providers) {
-        const apiKey = getSetting(`ai_key_${provider}`) ?? ''
-        if (apiKey.trim()) {
-            const baseUrl = getSetting(`ai_base_url_${provider}`)?.trim() || undefined
-            const model = getSetting(`ai_model_${provider}`)?.trim() || undefined
-            return { provider, apiKey: apiKey.trim(), baseUrl, model }
-        }
+    const provider = (getSetting('ai_provider') ?? 'deepseek') as AIProvider
+    const apiKey = (getSetting(`ai_key_${provider}`) ?? '').trim()
+    if (!apiKey) {
+        throw new Error(`请先在设置中为"${provider}"配置 API Key`)
     }
-
-    throw new Error('请先在设置中配置 AI API Key')
+    const baseUrl = getSetting(`ai_base_url_${provider}`)?.trim() || undefined
+    const model = getSetting(`ai_model_${provider}`)?.trim() || undefined
+    return { provider, apiKey, baseUrl, model }
 }
 
 export function registerAllIpcHandlers(): void {
@@ -96,6 +100,10 @@ export function registerAllIpcHandlers(): void {
         fetchWeeklyKLine(code, weeks ?? 60)
     )
 
+    ipcMain.handle('market:getMonthlyKLine', (_e, code: string, months: number) =>
+        fetchMonthlyKLine(code, months ?? 36)
+    )
+
     ipcMain.handle('market:search', (_e, keyword: string) => searchStock(keyword))
 
     ipcMain.handle('market:getSectorInfo', (_e, code: string) => fetchSectorInfo(code))
@@ -120,6 +128,10 @@ export function registerAllIpcHandlers(): void {
             fetchDynamicCandidates(topSectorCount ?? 5, perSector ?? 4)
     )
 
+    ipcMain.handle('market:getAmbushSectors', (_e, limit?: number) =>
+        fetchAmbushSectors(limit ?? 8)
+    )
+
     ipcMain.handle(
         'ai:marketContext',
         async (
@@ -128,13 +140,23 @@ export function registerAllIpcHandlers(): void {
                 news: string[]
                 date: string
                 topSectors?: Array<{ name: string; changePercent: number }>
+                ambushSectors?: Array<{
+                    name: string
+                    changePercent: number
+                    return5d: number
+                    return10d: number
+                    volumeTrend: number
+                    distanceToHigh: number
+                    reasons: string[]
+                }>
             }
         ) => {
             const { provider, apiKey, baseUrl, model } = getConfiguredAI()
             const messages = buildMarketContextPrompt(
                 payload.news,
                 payload.date,
-                payload.topSectors
+                payload.topSectors,
+                payload.ambushSectors
             )
             return callAI(provider, { apiKey, baseUrl, model }, messages)
         }
@@ -316,28 +338,77 @@ export function registerAllIpcHandlers(): void {
         }
     )
 
-    // --- AI Chat（工具调用 Agent，流式）---
+    // --- AI Chat 会话管理 ---
+    ipcMain.handle('chat:listSessions', () => listChatSessions())
+
+    ipcMain.handle('chat:createSession', (_e, title?: string) => {
+        const id = randomUUID()
+        return createChatSession(id, title?.trim() || '新对话')
+    })
+
+    ipcMain.handle('chat:renameSession', (_e, id: string, title: string) => {
+        renameChatSession(id, title)
+        return listChatSessions().find((s) => s.id === id) ?? null
+    })
+
+    ipcMain.handle('chat:deleteSession', (_e, id: string) => {
+        deleteChatSession(id)
+        return true
+    })
+
+    ipcMain.handle('chat:getMessages', (_e, sessionId: string) => listChatMessages(sessionId))
+
+    /**
+     * 从 checkpointer 恢复消息：用于 UI 侧 chat_messages 表意外为空的兜底
+     * （chat_messages 是"UI 展示视图"，checkpointer 才是"Agent 权威状态"）
+     */
+    ipcMain.handle('chat:restoreFromCheckpoint', async (_e, sessionId: string) => {
+        return getSessionMessagesFromCheckpoint(sessionId)
+    })
+
+    // --- AI Chat（流式 + LangGraph checkpointer） ---
+    // 每个流式请求维护一个 AbortController，`ai:chat:stop` 时终止 Agent 执行
+    const activeAborts = new Map<string, AbortController>()
+
     ipcMain.on(
         'ai:chat:start',
         async (
             event,
             payload: {
-                messages: Array<{ role: string; content: string }>
+                sessionId: string
+                input: string
                 requestId: string
             }
         ) => {
             const sender = event.sender
-            const { requestId } = payload
+            const { requestId, sessionId, input } = payload
+            const controller = new AbortController()
+            activeAborts.set(requestId, controller)
+
+            const cleanupAbort = () => activeAborts.delete(requestId)
+
             try {
                 const { provider, apiKey, baseUrl, model } = getConfiguredAI()
-                const allMessages = payload.messages.filter(
-                    (m) => m.role === 'user' || m.role === 'assistant'
-                )
-                const lastMsg = allMessages[allMessages.length - 1]
-                if (!lastMsg || lastMsg.role !== 'user') {
-                    sender.send('ai:chat:error', { requestId, error: '最后一条消息必须是用户消息' })
+                if (!input?.trim()) {
+                    sender.send('ai:chat:error', { requestId, error: '输入不能为空' })
                     return
                 }
+                if (!sessionId) {
+                    sender.send('ai:chat:error', { requestId, error: '缺少 sessionId' })
+                    return
+                }
+
+                // 先把用户消息落到 chat_messages（展示表）
+                appendChatMessage(sessionId, 'user', input)
+
+                // 如果这是首条 user 消息，用它前 20 字自动生成 title
+                const existing = listChatMessages(sessionId)
+                if (existing.length === 1) {
+                    const auto = input.trim().replace(/\s+/g, ' ').slice(0, 20)
+                    if (auto) renameChatSession(sessionId, auto)
+                }
+                touchChatSession(sessionId)
+
                 const profile = getInvestorProfile()
                 const result = await runResearchAgent(
                     {
@@ -345,9 +416,10 @@ export function registerAllIpcHandlers(): void {
                         apiKey,
                         baseUrl,
                         model,
-                        input: lastMsg.content,
-                        history: allMessages.slice(0, -1),
+                        sessionId,
+                        input,
                         userProfile: formatInvestorProfile(profile),
+                        abortSignal: controller.signal,
                     },
                     (chunk: string) => {
                         if (!sender.isDestroyed()) {
@@ -355,48 +427,45 @@ export function registerAllIpcHandlers(): void {
                         }
                     }
                 )
+
+                // 落库助手回复（含被 stop 时保留的部分内容）
+                if (result.content.trim()) {
+                    appendChatMessage(sessionId, 'assistant', result.content, result.toolCalls)
+                }
+                touchChatSession(sessionId)
+
                 if (!sender.isDestroyed()) {
-                    sender.send('ai:chat:done', { requestId, toolCalls: result.toolCalls })
+                    sender.send('ai:chat:done', {
+                        requestId,
+                        toolCalls: result.toolCalls,
+                        aborted: !!result.aborted,
+                    })
                 }
             } catch (e) {
-                if (!event.sender.isDestroyed()) {
+                const isAbort =
+                    (e instanceof Error && e.name === 'AbortError') || controller.signal.aborted
+                if (isAbort) {
+                    if (!event.sender.isDestroyed()) {
+                        event.sender.send('ai:chat:done', {
+                            requestId,
+                            toolCalls: [],
+                            aborted: true,
+                        })
+                    }
+                } else if (!event.sender.isDestroyed()) {
                     event.sender.send('ai:chat:error', {
                         requestId,
                         error: e instanceof Error ? e.message : String(e),
                     })
                 }
+            } finally {
+                cleanupAbort()
             }
         }
     )
 
-    // --- AI Chat（工具调用 Agent）---
-    // 前端传来完整历史（含本轮），这里把最后一条 user 消息作为 input，其余作为 history。
-    ipcMain.handle(
-        'ai:chat',
-        async (
-            _e,
-            payload: {
-                messages: Array<{ role: string; content: string }>
-            }
-        ) => {
-            const { provider, apiKey, baseUrl, model } = getConfiguredAI()
-            const allMessages = payload.messages.filter(
-                (m) => m.role === 'user' || m.role === 'assistant'
-            )
-            const lastMsg = allMessages[allMessages.length - 1]
-            if (!lastMsg || lastMsg.role !== 'user') {
-                throw new Error('最后一条消息必须是用户消息')
-            }
-            const profile = getInvestorProfile()
-            return runResearchAgent({
-                provider,
-                apiKey,
-                baseUrl,
-                model,
-                input: lastMsg.content,
-                history: allMessages.slice(0, -1),
-                userProfile: formatInvestorProfile(profile),
-            })
-        }
-    )
+    ipcMain.on('ai:chat:stop', (_e, payload: { requestId: string }) => {
+        const controller = activeAborts.get(payload.requestId)
+        if (controller) controller.abort()
+    })
 }

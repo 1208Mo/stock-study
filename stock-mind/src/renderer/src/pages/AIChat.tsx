@@ -1,12 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-
-interface ChatMessage {
-    role: 'user' | 'assistant'
-    content: string
-    // 正在流式接收时为 true，用于显示 loading 态
-    pending?: boolean
-}
+import remarkGfm from 'remark-gfm'
+import { ChatSidebar } from '../components/ChatSidebar'
+import { useChatSessionsStore, type ChatMessage } from '../stores/chatSessionsStore'
+import type { ResearchToolTrace } from '../types'
 
 const SUGGESTIONS = [
     '中国平安现在还能买吗？',
@@ -17,102 +14,219 @@ const SUGGESTIONS = [
     '半导体板块的核心逻辑是什么？',
 ]
 
-const HISTORY_KEY = 'ai_chat_history'
+const SCROLL_THRESHOLD = 120 // px：距底部这么近才自动跟随
 
-function loadHistory(): ChatMessage[] {
-    try {
-        // 历史里不保留 pending 状态
-        const raw: ChatMessage[] = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]')
-        return raw.map(({ role, content }) => ({ role, content }))
-    } catch {
-        return []
-    }
-}
-function saveHistory(msgs: ChatMessage[]) {
-    try {
-        const cleaned = msgs
-            .filter((m) => !m.pending)
-            .map(({ role, content }) => ({ role, content }))
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(cleaned.slice(-60)))
-    } catch {}
-}
+const MessageBubble = memo(function MessageBubble({
+    msg,
+    onCopy,
+}: {
+    msg: ChatMessage
+    onCopy: (content: string) => void
+}) {
+    const isAssistant = msg.role === 'assistant'
+    const isStreaming = !!msg.pending && isAssistant
+    const isEmptyStreaming = isStreaming && msg.content === ''
+
+    return (
+        <div className={`chat-bubble-wrap ${msg.role}`}>
+            {isAssistant && (
+                <div className="chat-avatar chat-avatar-ai" aria-hidden="true">
+                    AI
+                </div>
+            )}
+            <div className="chat-bubble-col">
+                <div
+                    className={`chat-bubble ${msg.role}${
+                        isStreaming ? ' streaming' : ''
+                    }${msg.stopped ? ' stopped' : ''}`}
+                >
+                    {isAssistant ? (
+                        isEmptyStreaming ? (
+                            <div className="chat-loading" aria-label="AI 正在思考">
+                                <span className="chat-dot" />
+                                <span className="chat-dot" />
+                                <span className="chat-dot" />
+                            </div>
+                        ) : (
+                            <div className="markdown-body chat-markdown">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {msg.content}
+                                </ReactMarkdown>
+                                {isStreaming && <span className="chat-caret" aria-hidden="true" />}
+                                {msg.stopped && (
+                                    <div className="chat-stopped-note">— 已停止生成</div>
+                                )}
+                            </div>
+                        )
+                    ) : (
+                        <span>{msg.content}</span>
+                    )}
+                </div>
+
+                {isAssistant && !isEmptyStreaming && !isStreaming && (
+                    <div className="chat-msg-actions" role="group" aria-label="消息操作">
+                        <button
+                            type="button"
+                            className="chat-msg-action"
+                            onClick={() => onCopy(msg.content)}
+                            aria-label="复制"
+                            title="复制"
+                        >
+                            复制
+                        </button>
+                    </div>
+                )}
+            </div>
+        </div>
+    )
+})
 
 export default function AIChat() {
-    const [messages, setMessages] = useState<ChatMessage[]>(() => loadHistory())
+    const loaded = useChatSessionsStore((s) => s.loaded)
+    const loadSessions = useChatSessionsStore((s) => s.loadSessions)
+    const activeSessionId = useChatSessionsStore((s) => s.activeSessionId)
+    const messages = useChatSessionsStore((s) =>
+        s.activeSessionId ? s.messagesBySession[s.activeSessionId] ?? [] : []
+    )
+    const appendMessage = useChatSessionsStore((s) => s.appendMessage)
+    const updatePendingMessage = useChatSessionsStore((s) => s.updatePendingMessage)
+    const finalizePendingMessage = useChatSessionsStore((s) => s.finalizePendingMessage)
+    const replaceMessages = useChatSessionsStore((s) => s.replaceMessages)
+
     const [input, setInput] = useState('')
-    // 是否有任何一条消息还在接收中，只用来控制输入框禁用
     const [sending, setSending] = useState(false)
     const [error, setError] = useState('')
+    const [copiedHint, setCopiedHint] = useState(false)
+    const messagesRef = useRef<HTMLDivElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLTextAreaElement>(null)
+    const textareaMinHeight = 44
+    const textareaMaxHeight = 160
+    const activeRequestIdRef = useRef<string | null>(null)
+    const isNearBottomRef = useRef(true)
 
+    // 首次挂载时加载会话
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [messages])
+        if (!loaded) {
+            void loadSessions()
+        }
+    }, [loaded, loadSessions])
 
-    async function handleSend(text?: string) {
-        const content = (text ?? input).trim()
-        if (!content || sending) return
+    // 切换会话时清掉输入框和错误提示
+    useEffect(() => {
         setInput('')
         setError('')
+        isNearBottomRef.current = true
+    }, [activeSessionId])
 
-        const userMsg: ChatMessage = { role: 'user', content }
-        // 当前 messages 是历史（不含本轮），连同 userMsg 作为本轮上下文
-        const historyForAgent = [...messages, userMsg]
-
-        // 更新界面：加上用户消息 + 空的 pending assistant 占位
-        setMessages([...historyForAgent, { role: 'assistant', content: '', pending: true }])
-        setSending(true)
-
-        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
-
-        const offChunk = window.api.ai.onChatChunk(({ requestId: rid, chunk }) => {
-            if (rid !== requestId) return
-            setMessages((prev) => {
-                const next = [...prev]
-                const idx = next.findLastIndex((m) => m.pending && m.role === 'assistant')
-                if (idx === -1) return prev
-                next[idx] = { ...next[idx], content: next[idx].content + chunk }
-                return next
-            })
-        })
-
-        const offDone = window.api.ai.onChatDone(({ requestId: rid }) => {
-            if (rid !== requestId) return
-            cleanup()
-            setSending(false)
-            setMessages((prev) => {
-                const next = prev.map((m) =>
-                    m.pending && m.role === 'assistant'
-                        ? { role: 'assistant' as const, content: m.content }
-                        : m
-                )
-                saveHistory(next)
-                return next
-            })
-            inputRef.current?.focus()
-        })
-
-        const offError = window.api.ai.onChatError(({ requestId: rid, error: errMsg }) => {
-            if (rid !== requestId) return
-            cleanup()
-            setError(errMsg)
-            // 回退到发送前的状态（去掉本轮 user + pending assistant）
-            setMessages(messages)
-            setSending(false)
-            inputRef.current?.focus()
-        })
-
-        function cleanup() {
-            offChunk()
-            offDone()
-            offError()
+    // 智能自动滚动：只有当用户接近底部时才跟随
+    useLayoutEffect(() => {
+        const el = messagesRef.current
+        if (!el) return
+        if (isNearBottomRef.current) {
+            bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
         }
+    }, [messages])
 
-        window.api.ai.chatStream(
-            { messages: historyForAgent.map((m) => ({ role: m.role, content: m.content })) },
-            requestId
-        )
+    // 监听滚动，记录是否接近底部
+    useEffect(() => {
+        const el = messagesRef.current
+        if (!el) return
+        const handler = () => {
+            const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+            isNearBottomRef.current = distance < SCROLL_THRESHOLD
+        }
+        handler()
+        el.addEventListener('scroll', handler, { passive: true })
+        return () => el.removeEventListener('scroll', handler)
+    }, [])
+
+    // textarea 自动增高
+    useEffect(() => {
+        const ta = inputRef.current
+        if (!ta) return
+        ta.style.height = 'auto'
+        const next = Math.min(Math.max(ta.scrollHeight, textareaMinHeight), textareaMaxHeight)
+        ta.style.height = `${next}px`
+    }, [input])
+
+    const doSend = useCallback(
+        (content: string): void => {
+            const sessionId = activeSessionId
+            if (!content.trim() || !sessionId || sending) return
+            setError('')
+
+            const trimmed = content.trim()
+            appendMessage(sessionId, { role: 'user', content: trimmed })
+            appendMessage(sessionId, { role: 'assistant', content: '', pending: true })
+            setSending(true)
+            isNearBottomRef.current = true
+
+            const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+            activeRequestIdRef.current = requestId
+
+            const offChunk = window.api.ai.onChatChunk(({ requestId: rid, chunk }) => {
+                if (rid !== requestId) return
+                updatePendingMessage(sessionId, (msg) => ({
+                    ...msg,
+                    content: msg.content + chunk,
+                }))
+            })
+
+            const cleanup = () => {
+                offChunk()
+                offDone()
+                offError()
+                activeRequestIdRef.current = null
+            }
+
+            const offDone = window.api.ai.onChatDone(({ requestId: rid, toolCalls, aborted }) => {
+                if (rid !== requestId) return
+                cleanup()
+                setSending(false)
+                finalizePendingMessage(sessionId, (msg) => ({
+                    role: 'assistant',
+                    content: msg.content,
+                    stopped: !!aborted,
+                    toolCalls: toolCalls as ResearchToolTrace[],
+                }))
+                inputRef.current?.focus()
+            })
+
+            const offError = window.api.ai.onChatError(({ requestId: rid, error: errMsg }) => {
+                if (rid !== requestId) return
+                cleanup()
+                setSending(false)
+                setError(errMsg)
+                // 回退：去掉本轮 user + pending assistant
+                const cur =
+                    useChatSessionsStore.getState().messagesBySession[sessionId] ?? []
+                replaceMessages(sessionId, cur.slice(0, -2))
+                inputRef.current?.focus()
+            })
+
+            window.api.ai.chatStream({ sessionId, input: trimmed }, requestId)
+        },
+        [
+            activeSessionId,
+            sending,
+            appendMessage,
+            updatePendingMessage,
+            finalizePendingMessage,
+            replaceMessages,
+        ]
+    )
+
+    function handleSend(text?: string) {
+        const content = (text ?? input).trim()
+        if (!content) return
+        setInput('')
+        doSend(content)
+    }
+
+    function handleStop() {
+        const rid = activeRequestIdRef.current
+        if (rid) window.api.ai.chatStop(rid)
     }
 
     function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -122,100 +236,135 @@ export default function AIChat() {
         }
     }
 
-    function handleClear() {
-        setMessages([])
-        saveHistory([])
-        setError('')
+    async function handleCopy(content: string) {
+        try {
+            await navigator.clipboard.writeText(content)
+            setCopiedHint(true)
+            window.setTimeout(() => setCopiedHint(false), 1200)
+        } catch {
+            // ignore
+        }
+    }
+
+    function handleRetry() {
+        const list = useChatSessionsStore.getState().messagesBySession[activeSessionId ?? ''] ?? []
+        const last = list[list.length - 1]
+        if (last && last.role === 'user') {
+            // 出错时我们已经回退掉了 user，这个分支实际上走不到
+            doSend(last.content)
+        }
     }
 
     return (
-        <div className="chat-page">
-            <div className="page-header">
-                <div>
-                    <h1 className="page-title">AI 炒股助手</h1>
-                    <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                        可以询问个股分析、板块逻辑、技术指标、操作策略等问题
-                    </p>
+        <div className="chat-layout">
+            <ChatSidebar />
+            <div className="chat-page">
+                <div className="page-header">
+                    <div>
+                        <h1 className="page-title">AI 炒股助手</h1>
+                        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                            可以询问个股分析、板块逻辑、技术指标、操作策略等问题
+                        </p>
+                    </div>
                 </div>
-                {messages.length > 0 && (
-                    <button className="btn-small" style={{ color: '#888' }} onClick={handleClear}>
-                        清空对话
-                    </button>
-                )}
-            </div>
 
-            <div className="chat-messages">
-                {messages.length === 0 && (
-                    <div className="chat-welcome">
-                        <div className="chat-welcome-title">你好，我是 AI 炒股助手</div>
-                        <p>你可以问我任何关于 A 股的问题，例如：</p>
-                        <div className="chat-suggestions">
-                            {SUGGESTIONS.map((s) => (
-                                <button
-                                    key={s}
-                                    className="chat-suggestion-btn"
-                                    onClick={() => handleSend(s)}
-                                >
-                                    {s}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
-                {messages.map((msg, i) => (
-                    <div key={i} className={`chat-bubble-wrap ${msg.role}`}>
-                        <div className={`chat-bubble ${msg.role}`}>
-                            {msg.role === 'assistant' ? (
-                                msg.pending && msg.content === '' ? (
-                                    // 正在等待第一个 chunk：显示 loading 动画
-                                    <div className="chat-loading">
-                                        <span className="chat-dot" />
-                                        <span className="chat-dot" />
-                                        <span className="chat-dot" />
-                                    </div>
-                                ) : (
-                                    <div className="markdown-body chat-markdown">
-                                        <ReactMarkdown>{msg.content}</ReactMarkdown>
-                                    </div>
-                                )
-                            ) : (
-                                <span>{msg.content}</span>
-                            )}
-                        </div>
-                    </div>
-                ))}
-                {error && (
-                    <div className="chat-bubble-wrap assistant">
-                        <div className="chat-bubble assistant" style={{ color: 'var(--danger)' }}>
-                            {error}
-                        </div>
-                    </div>
-                )}
-                <div ref={bottomRef} />
-            </div>
-
-            <div className="chat-input-bar">
-                <textarea
-                    ref={inputRef}
-                    className="chat-input"
-                    rows={2}
-                    placeholder="输入问题，Enter 发送，Shift+Enter 换行..."
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    disabled={sending}
-                />
-                <button
-                    className="btn-primary chat-send-btn"
-                    onClick={() => handleSend()}
-                    disabled={sending || !input.trim()}
+                <div
+                    className="chat-messages"
+                    ref={messagesRef}
+                    role="log"
+                    aria-live="polite"
+                    aria-relevant="additions text"
                 >
-                    {sending ? '...' : '发送'}
-                </button>
-            </div>
+                    {activeSessionId && messages.length === 0 && (
+                        <div className="chat-welcome">
+                            <div className="chat-welcome-title">你好，我是 AI 炒股助手</div>
+                            <p>你可以问我任何关于 A 股的问题，例如：</p>
+                            <div className="chat-suggestions">
+                                {SUGGESTIONS.map((s, i) => (
+                                    <button
+                                        key={s}
+                                        className="chat-suggestion-btn"
+                                        style={{ animationDelay: `${i * 60}ms` }}
+                                        onClick={() => handleSend(s)}
+                                    >
+                                        {s}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    {messages.map((msg, i) => (
+                        <MessageBubble key={i} msg={msg} onCopy={handleCopy} />
+                    ))}
+                    {error && (
+                        <div className="chat-bubble-wrap assistant">
+                            <div className="chat-avatar chat-avatar-ai" aria-hidden="true">
+                                !
+                            </div>
+                            <div className="chat-bubble-col">
+                                <div
+                                    className="chat-bubble assistant chat-bubble-error"
+                                    role="alert"
+                                >
+                                    <div>{error}</div>
+                                    <button
+                                        type="button"
+                                        className="chat-msg-action"
+                                        style={{ marginTop: 6 }}
+                                        onClick={handleRetry}
+                                    >
+                                        重试
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    <div ref={bottomRef} />
+                </div>
 
-            <div className="disclaimer-box" style={{ marginTop: 8 }}>
-                AI 回答仅供参考，不构成投资建议。股市有风险，投资需谨慎。
+                {/* 屏幕阅读器实时提示 */}
+                <div role="status" aria-live="polite" className="sr-only">
+                    {sending ? 'AI 正在回复' : ''}
+                </div>
+
+                <div className="chat-input-bar">
+                    <textarea
+                        ref={inputRef}
+                        className="chat-input"
+                        rows={1}
+                        placeholder="输入问题，Enter 发送，Shift+Enter 换行..."
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        disabled={sending || !activeSessionId}
+                    />
+                    {sending ? (
+                        <button
+                            type="button"
+                            className="btn-primary chat-send-btn chat-stop-btn"
+                            onClick={handleStop}
+                            aria-label="停止生成"
+                        >
+                            停止
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            className="btn-primary chat-send-btn"
+                            onClick={() => handleSend()}
+                            disabled={!input.trim() || !activeSessionId}
+                            aria-label="发送"
+                        >
+                            发送
+                        </button>
+                    )}
+                </div>
+
+                <div className="disclaimer-box" style={{ marginTop: 8 }}>
+                    AI 回答仅供参考，不构成投资建议。股市有风险，投资需谨慎。
+                </div>
+
+                {copiedHint && <div className="chat-toast">已复制到剪贴板</div>}
             </div>
         </div>
     )
