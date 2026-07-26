@@ -244,7 +244,7 @@ export default function Watchlist() {
                         return (
                             <div
                                 key={item.id}
-                                className="watchlist-item"
+                                className={`watchlist-item ${quote && quote.changePercent >= 0 ? 'up' : quote && quote.changePercent < 0 ? 'down' : ''}`}
                                 onClick={() =>
                                     navigate(
                                         `/realtime/${item.code}?name=${encodeURIComponent(item.name)}`

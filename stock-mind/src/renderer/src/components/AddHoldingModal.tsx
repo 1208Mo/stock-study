@@ -5,6 +5,7 @@ import type { Holding } from '../types'
 interface Props {
     onClose: () => void
     editingHolding?: Holding
+    tradingHolding?: Holding
 }
 
 // 从文本中解析股票代码列表（支持持仓记录格式：代码 名称 成本价 持仓量）
@@ -34,15 +35,20 @@ function parseCodesFromText(
     return results
 }
 
-export default function AddHoldingModal({ onClose, editingHolding }: Props) {
-    const { addHolding, updateHolding } = useHoldingsStore()
+export default function AddHoldingModal({ onClose, editingHolding, tradingHolding }: Props) {
+    const { addHolding, updateHolding, addTrade } = useHoldingsStore()
     const isEdit = !!editingHolding
-    const [code, setCode] = useState(editingHolding?.code ?? '')
-    const [name, setName] = useState(editingHolding?.name ?? '')
+    const isTrade = !!tradingHolding
+    const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy')
+    const [code, setCode] = useState(editingHolding?.code ?? tradingHolding?.code ?? '')
+    const [name, setName] = useState(editingHolding?.name ?? tradingHolding?.name ?? '')
     const [costPrice, setCostPrice] = useState(
         editingHolding ? String(editingHolding.cost_price) : ''
     )
     const [quantity, setQuantity] = useState(editingHolding ? String(editingHolding.quantity) : '')
+    const [tradeQuantity, setTradeQuantity] = useState('')
+    const [tradeCostPrice, setTradeCostPrice] = useState('')
+    const [tradeNote, setTradeNote] = useState('')
     const [searching, setSearching] = useState(false)
     const [searchResults, setSearchResults] = useState<{ code: string; name: string }[]>([])
     const [error, setError] = useState('')
@@ -86,6 +92,60 @@ export default function AddHoldingModal({ onClose, editingHolding }: Props) {
     }
 
     async function handleSubmit() {
+        // 加仓/减仓逻辑
+        if (isTrade && tradingHolding) {
+            if (!tradeQuantity) {
+                setError('请填写交易数量')
+                return
+            }
+            const qty = parseInt(tradeQuantity)
+            if (isNaN(qty) || qty <= 0) {
+                setError('交易数量必须为正数')
+                return
+            }
+            if (qty % 100 !== 0) {
+                setError('交易数量必须是 100 的整数倍（A股最小交易单位 1 手 = 100 股）')
+                return
+            }
+            if (tradeType === 'sell' && qty > tradingHolding.quantity) {
+                setError(`卖出数量不能超过持仓数量（当前持仓 ${tradingHolding.quantity} 股）`)
+                return
+            }
+            if (tradeType === 'buy') {
+                if (!tradeCostPrice) {
+                    setError('请填写买入成本价')
+                    return
+                }
+                const cp = parseFloat(tradeCostPrice)
+                if (isNaN(cp) || cp <= 0) {
+                    setError('成本价必须为正数')
+                    return
+                }
+                setSubmitting(true)
+                try {
+                    await addTrade(tradingHolding.id, 'buy', cp, qty, tradeNote)
+                    onClose()
+                } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : '加仓失败')
+                } finally {
+                    setSubmitting(false)
+                }
+            } else {
+                // 减仓不需要成本价，使用当前价格
+                setSubmitting(true)
+                try {
+                    await addTrade(tradingHolding.id, 'sell', tradingHolding.avg_cost_price ?? tradingHolding.cost_price, qty, tradeNote)
+                    onClose()
+                } catch (e: unknown) {
+                    setError(e instanceof Error ? e.message : '减仓失败')
+                } finally {
+                    setSubmitting(false)
+                }
+            }
+            return
+        }
+
+        // 添加/编辑持仓逻辑
         if (!code || !name || !costPrice || !quantity) {
             setError('请填写所有字段')
             return
@@ -164,9 +224,11 @@ export default function AddHoldingModal({ onClose, editingHolding }: Props) {
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h2>{isEdit ? `编辑持仓 · ${name}` : '添加持仓'}</h2>
+                    <h2>
+                        {isTrade ? `${tradeType === 'buy' ? '加仓' : '减仓'} · ${name}` : isEdit ? `编辑持仓 · ${name}` : '添加持仓'}
+                    </h2>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        {!isEdit && (
+                        {!isEdit && !isTrade && (
                             <button
                                 className={`btn-small ${batchMode ? 'active' : ''}`}
                                 style={{ fontSize: 11 }}
@@ -185,7 +247,82 @@ export default function AddHoldingModal({ onClose, editingHolding }: Props) {
                     </div>
                 </div>
 
-                {batchMode ? (
+                {isTrade && tradingHolding ? (
+                    <div className="modal-body">
+                        {/* 交易类型选择 */}
+                        <div className="form-row">
+                            <label className="label">交易类型</label>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button
+                                    className={`btn-secondary ${tradeType === 'buy' ? 'active' : ''}`}
+                                    onClick={() => setTradeType('buy')}
+                                >
+                                    加仓
+                                </button>
+                                <button
+                                    className={`btn-secondary ${tradeType === 'sell' ? 'active' : ''}`}
+                                    onClick={() => setTradeType('sell')}
+                                >
+                                    减仓
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* 当前持仓信息 */}
+                        <div className="form-row">
+                            <label className="label">当前持仓</label>
+                            <div style={{ display: 'flex', gap: 16, fontSize: 13 }}>
+                                <span>数量：<strong>{tradingHolding.quantity}</strong> 股</span>
+                                <span>
+                                    成本价：<strong>{(tradingHolding.avg_cost_price ?? tradingHolding.cost_price).toFixed(2)}</strong> 元
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* 交易数量 */}
+                        <div className="form-row">
+                            <label className="label">交易数量 (股)</label>
+                            <input
+                                className="input"
+                                type="number"
+                                step="100"
+                                min="100"
+                                placeholder={`如：1000（当前持仓 ${tradingHolding.quantity} 股）`}
+                                value={tradeQuantity}
+                                onChange={(e) => setTradeQuantity(e.target.value)}
+                            />
+                            <span className="input-hint">1手=100股，最少填100</span>
+                        </div>
+
+                        {/* 买入成本价（仅加仓时显示） */}
+                        {tradeType === 'buy' && (
+                            <div className="form-row">
+                                <label className="label">买入成本价 (元)</label>
+                                <input
+                                    className="input"
+                                    type="number"
+                                    step="0.01"
+                                    placeholder="如：10.50"
+                                    value={tradeCostPrice}
+                                    onChange={(e) => setTradeCostPrice(e.target.value)}
+                                />
+                            </div>
+                        )}
+
+                        {/* 备注 */}
+                        <div className="form-row">
+                            <label className="label">备注（可选）</label>
+                            <input
+                                className="input"
+                                placeholder="记录交易原因、策略等"
+                                value={tradeNote}
+                                onChange={(e) => setTradeNote(e.target.value)}
+                            />
+                        </div>
+
+                        {error && <div className="error-msg">{error}</div>}
+                    </div>
+                ) : batchMode ? (
                     <div className="modal-body">
                         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
                             将截图中的持仓文字粘贴到下方，或直接输入股票代码（每行一个）。
@@ -327,7 +464,21 @@ export default function AddHoldingModal({ onClose, editingHolding }: Props) {
                     <button className="btn-secondary" onClick={onClose}>
                         取消
                     </button>
-                    {batchMode ? (
+                    {isTrade ? (
+                        <button
+                            className="btn-primary"
+                            onClick={handleSubmit}
+                            disabled={submitting}
+                        >
+                            {submitting
+                                ? tradeType === 'buy'
+                                    ? '加仓中...'
+                                    : '减仓中...'
+                                : tradeType === 'buy'
+                                  ? '确认加仓'
+                                  : '确认减仓'}
+                        </button>
+                    ) : batchMode ? (
                         <button
                             className="btn-primary"
                             onClick={handleBatchImport}

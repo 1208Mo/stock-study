@@ -5,9 +5,16 @@ import {
     addHolding,
     updateHolding,
     deleteHolding,
+    addTrade,
+    getHoldingTrades,
     getAllWatchlist,
     addToWatchlist,
     removeFromWatchlist,
+    getAllWatchlistGroups,
+    addWatchlistGroup,
+    removeWatchlistGroup,
+    setWatchlistItemGroup,
+    getAllWatchlistItemGroups,
     getSetting,
     setSetting,
     getInvestorProfile,
@@ -80,6 +87,15 @@ export function registerAllIpcHandlers(): void {
 
     ipcMain.handle('holdings:delete', (_e, id: number) => deleteHolding(id))
 
+    ipcMain.handle(
+        'holdings:addTrade',
+        (_e, holdingId: number, tradeType: 'buy' | 'sell', costPrice: number, quantity: number, note?: string) => {
+            return addTrade(holdingId, tradeType, costPrice, quantity, note)
+        }
+    )
+
+    ipcMain.handle('holdings:getTrades', (_e, holdingId: number) => getHoldingTrades(holdingId))
+
     // --- Watchlist ---
     ipcMain.handle('watchlist:getAll', () => getAllWatchlist())
 
@@ -88,6 +104,21 @@ export function registerAllIpcHandlers(): void {
     })
 
     ipcMain.handle('watchlist:remove', (_e, id: number) => removeFromWatchlist(id))
+
+    ipcMain.handle('watchlist:getGroups', () => getAllWatchlistGroups())
+
+    ipcMain.handle('watchlist:addGroup', (_e, name: string) => addWatchlistGroup(name))
+
+    ipcMain.handle('watchlist:removeGroup', (_e, name: string) => removeWatchlistGroup(name))
+
+    ipcMain.handle('watchlist:setItemGroup', (_e, itemId: number, groupName: string) =>
+        setWatchlistItemGroup(itemId, groupName)
+    )
+
+    ipcMain.handle('watchlist:getItemGroups', () => {
+        const map = getAllWatchlistItemGroups()
+        return Array.from(map.entries())
+    })
 
     // --- Market data ---
     ipcMain.handle('market:getQuote', (_e, code: string) => fetchQuote(code))

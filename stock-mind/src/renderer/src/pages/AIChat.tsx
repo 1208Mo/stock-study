@@ -6,12 +6,14 @@ import { useChatSessionsStore, type ChatMessage } from '../stores/chatSessionsSt
 import type { ResearchToolTrace } from '../types'
 
 const SUGGESTIONS = [
-    '中国平安现在还能买吗？',
-    '510300 沪深300ETF适合定投吗？',
-    '今天大盘走势如何判断？',
-    '什么情况下该止损？',
-    '如何看均线多头排列？',
-    '半导体板块的核心逻辑是什么？',
+    '今天有哪些强势股值得关注？',
+    '帮我分析一下今日市场热点板块',
+    '推荐几只近期可能大涨的股票',
+    '今天哪些股票出现了买入信号？',
+    '近期涨停股有哪些？帮我分析一下',
+    '哪些个股处于低位即将启动？',
+    '帮我看看哪些股票放量上涨了',
+    '今天有什么短线机会？',
 ]
 
 const SCROLL_THRESHOLD = 120 // px：距底部这么近才自动跟随
@@ -19,9 +21,13 @@ const SCROLL_THRESHOLD = 120 // px：距底部这么近才自动跟随
 const MessageBubble = memo(function MessageBubble({
     msg,
     onCopy,
+    onRegenerate,
+    onFeedback,
 }: {
     msg: ChatMessage
     onCopy: (content: string) => void
+    onRegenerate: (content: string) => void
+    onFeedback: (content: string, type: 'positive' | 'negative') => void
 }) {
     const isAssistant = msg.role === 'assistant'
     const isStreaming = !!msg.pending && isAssistant
@@ -68,11 +74,38 @@ const MessageBubble = memo(function MessageBubble({
                         <button
                             type="button"
                             className="chat-msg-action"
+                            onClick={() => onRegenerate(msg.content)}
+                            aria-label="重新生成"
+                            title="重新生成"
+                        >
+                            🔄 重新生成
+                        </button>
+                        <button
+                            type="button"
+                            className="chat-msg-action chat-feedback-btn positive"
+                            onClick={() => onFeedback(msg.content, 'positive')}
+                            aria-label="有用"
+                            title="这个回答很有帮助"
+                        >
+                            👍
+                        </button>
+                        <button
+                            type="button"
+                            className="chat-msg-action chat-feedback-btn negative"
+                            onClick={() => onFeedback(msg.content, 'negative')}
+                            aria-label="没用"
+                            title="这个回答没有帮助"
+                        >
+                            👎
+                        </button>
+                        <button
+                            type="button"
+                            className="chat-msg-action"
                             onClick={() => onCopy(msg.content)}
                             aria-label="复制"
                             title="复制"
                         >
-                            复制
+                            📋 复制
                         </button>
                     </div>
                 )}
@@ -96,7 +129,7 @@ export default function AIChat() {
     const [input, setInput] = useState('')
     const [sending, setSending] = useState(false)
     const [error, setError] = useState('')
-    const [copiedHint, setCopiedHint] = useState(false)
+    const [toastMessage, setToastMessage] = useState<string | null>(null)
     const messagesRef = useRef<HTMLDivElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -239,8 +272,34 @@ export default function AIChat() {
     async function handleCopy(content: string) {
         try {
             await navigator.clipboard.writeText(content)
-            setCopiedHint(true)
-            window.setTimeout(() => setCopiedHint(false), 1200)
+            setToastMessage('已复制到剪贴板')
+            window.setTimeout(() => setToastMessage(null), 1200)
+        } catch {
+            // ignore
+        }
+    }
+
+    function handleRegenerate(content: string) {
+        // 重新生成逻辑：移除最后一条消息，重新发送上一条用户消息
+        const list = useChatSessionsStore.getState().messagesBySession[activeSessionId ?? ''] ?? []
+        if (list.length >= 2) {
+            const userMsg = list[list.length - 2]
+            if (userMsg && userMsg.role === 'user') {
+                // 移除最后一条助手消息
+                replaceMessages(activeSessionId ?? '', list.slice(0, -1))
+                // 重新发送用户消息
+                doSend(userMsg.content)
+            }
+        }
+    }
+
+    async function handleFeedback(content: string, type: 'positive' | 'negative') {
+        try {
+            // 简单的反馈收集
+            console.log('Feedback:', type, content)
+            // 可以扩展为发送到后端或本地存储
+            setToastMessage(type === 'positive' ? '感谢反馈！' : '收到，我们会改进')
+            window.setTimeout(() => setToastMessage(null), 2000)
         } catch {
             // ignore
         }
@@ -294,7 +353,13 @@ export default function AIChat() {
                         </div>
                     )}
                     {messages.map((msg, i) => (
-                        <MessageBubble key={i} msg={msg} onCopy={handleCopy} />
+                        <MessageBubble
+                            key={i}
+                            msg={msg}
+                            onCopy={handleCopy}
+                            onRegenerate={handleRegenerate}
+                            onFeedback={handleFeedback}
+                        />
                     ))}
                     {error && (
                         <div className="chat-bubble-wrap assistant">
@@ -364,7 +429,7 @@ export default function AIChat() {
                     AI 回答仅供参考，不构成投资建议。股市有风险，投资需谨慎。
                 </div>
 
-                {copiedHint && <div className="chat-toast">已复制到剪贴板</div>}
+                {toastMessage && <div className="chat-toast">{toastMessage}</div>}
             </div>
         </div>
     )

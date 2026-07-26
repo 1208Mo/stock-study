@@ -18,6 +18,6 @@
             "@renderer/*": ["src/*"]
         }
     },
-    "include": ["src", "index.html"],
+    "include": ["src", "index.html", "pet.html"],
     "exclude": ["../../node_modules", "../../out", "../../dist"]
 }

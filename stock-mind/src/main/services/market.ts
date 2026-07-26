@@ -98,18 +98,36 @@ async function fetchQuoteFromSina(code: string): Promise<QuoteData> {
     const low = parseFloat(parts[5])
     const volume = parseFloat(parts[8])
     const amount = parseFloat(parts[9])
-    const change = parseFloat((price - prevClose).toFixed(2))
-    const changePercent = parseFloat(((change / prevClose) * 100).toFixed(2))
+
+    // 新浪接口对于部分股票（如ETF、基金）可能返回乘以100的数据
+    // 通过验证涨跌幅是否合理来判断是否需要除以100
+    let scale = 1
+    if (prevClose > 0 && price > 0) {
+        const rawChangePercent = Math.abs((price - prevClose) / prevClose * 100)
+        // 如果涨跌幅超过50%，很可能是数据被放大了100倍
+        if (rawChangePercent > 50 && prevClose > 100 && price > 100) {
+            scale = 100
+        }
+    }
+
+    const adjustedPrice = price / scale
+    const adjustedPrevClose = prevClose / scale
+    const adjustedOpen = open / scale
+    const adjustedHigh = high / scale
+    const adjustedLow = low / scale
+
+    const change = parseFloat((adjustedPrice - adjustedPrevClose).toFixed(2))
+    const changePercent = parseFloat(((change / adjustedPrevClose) * 100).toFixed(2))
 
     return {
         code,
         name,
-        price,
+        price: adjustedPrice,
         change,
         changePercent,
-        open,
-        high,
-        low,
+        open: adjustedOpen,
+        high: adjustedHigh,
+        low: adjustedLow,
         volume,
         amount,
         timestamp: new Date().toISOString(),

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useSettingsStore } from '../stores/settingsStore'
 import type { AIProvider } from '../stores/settingsStore'
 import type { InvestorProfile } from '../types'
@@ -86,9 +86,7 @@ export default function Settings() {
         saveAIBaseUrl,
         saveAlertThreshold,
     } = useSettingsStore()
-    const [saved, setSaved] = useState(false)
-    const [saving, setSaving] = useState(false)
-    const [saveError, setSaveError] = useState('')
+
     const [localProvider, setLocalProvider] = useState<AIProvider>(aiProvider)
     const [expandedProvider, setExpandedProvider] = useState<AIProvider>(aiProvider)
     const [localKeys, setLocalKeys] = useState<Record<AIProvider, string>>({
@@ -122,9 +120,9 @@ export default function Settings() {
         volcengine: false,
     })
     const [profile, setProfile] = useState<InvestorProfile>(EMPTY_PROFILE)
-    const [profileSaving, setProfileSaving] = useState(false)
-    const [profileSaved, setProfileSaved] = useState(false)
-    const [profileError, setProfileError] = useState('')
+
+    const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
+    const [saveMessage, setSaveMessage] = useState('')
 
     useEffect(() => {
         if (!loaded) loadSettings()
@@ -133,71 +131,136 @@ export default function Settings() {
 
     useEffect(() => {
         setLocalProvider(aiProvider)
-        setExpandedProvider(aiProvider)
         setLocalKeys(apiKeys)
         setLocalModels(aiModels)
         setLocalBaseUrls(aiBaseUrls)
         setLocalThreshold(alertThreshold)
     }, [aiProvider, apiKeys, aiModels, aiBaseUrls, alertThreshold])
 
+    // 仅在初始加载完成时设置展开状态，后续不强制重置，保持用户当前的展开选择
+    // 这样编辑非当前选中的模型时，卡片不会被自动折叠
+    useEffect(() => {
+        if (loaded) {
+            setExpandedProvider(aiProvider)
+        }
+    }, [loaded, aiProvider])
+
     async function loadInvestorProfile() {
         try {
             const result = await window.api.memory.getInvestorProfile()
             setProfile(result)
         } catch (e) {
-            setProfileError(e instanceof Error ? e.message : '投资记忆加载失败')
+            console.error('投资记忆加载失败:', e)
         }
     }
 
-    async function handleSaveProfile() {
-        setProfileSaving(true)
-        setProfileError('')
-        try {
-            const savedProfile = await window.api.memory.updateInvestorProfile({
-                capital: profile.capital,
-                riskLevel: profile.riskLevel,
-                preferredTypes: profile.preferredTypes,
-                avoidTypes: profile.avoidTypes,
-                preferredSectors: profile.preferredSectors,
-                notes: profile.notes,
-            })
-            setProfile(savedProfile)
-            setProfileSaved(true)
-            setTimeout(() => setProfileSaved(false), 2000)
-        } catch (e) {
-            setProfileError(e instanceof Error ? e.message : '投资记忆保存失败')
-        } finally {
-            setProfileSaving(false)
-        }
-    }
+    const showSaveFeedback = useCallback((message: string) => {
+        setSaveStatus('saved')
+        setSaveMessage(message)
+        setTimeout(() => {
+            setSaveStatus('idle')
+            setSaveMessage('')
+        }, 2000)
+    }, [])
 
-    async function handleSave() {
-        setSaving(true)
-        setSaveError('')
-        try {
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
             if (localProvider !== aiProvider) {
+                setSaveStatus('saving')
                 await saveAIProvider(localProvider)
+                showSaveFeedback('模型已切换')
             }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localProvider, aiProvider, loaded, saveAIProvider, showSaveFeedback])
+
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
             for (const p of Object.keys(localKeys) as AIProvider[]) {
-                if (localKeys[p] !== apiKeys[p]) await saveAPIKey(p, localKeys[p])
-                if (localModels[p] !== aiModels[p]) await saveAIModel(p, localModels[p])
-                if (localBaseUrls[p] !== aiBaseUrls[p]) await saveAIBaseUrl(p, localBaseUrls[p])
+                if (localKeys[p] !== apiKeys[p]) {
+                    setSaveStatus('saving')
+                    await saveAPIKey(p, localKeys[p])
+                    showSaveFeedback('API Key 已保存')
+                }
             }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localKeys, apiKeys, loaded, saveAPIKey, showSaveFeedback])
+
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
+            for (const p of Object.keys(localModels) as AIProvider[]) {
+                if (localModels[p] !== aiModels[p]) {
+                    setSaveStatus('saving')
+                    await saveAIModel(p, localModels[p])
+                    showSaveFeedback('模型配置已保存')
+                }
+            }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localModels, aiModels, loaded, saveAIModel, showSaveFeedback])
+
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
+            for (const p of Object.keys(localBaseUrls) as AIProvider[]) {
+                if (localBaseUrls[p] !== aiBaseUrls[p]) {
+                    setSaveStatus('saving')
+                    await saveAIBaseUrl(p, localBaseUrls[p])
+                    showSaveFeedback('接口地址已保存')
+                }
+            }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localBaseUrls, aiBaseUrls, loaded, saveAIBaseUrl, showSaveFeedback])
+
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
             const threshold = Math.max(1, Math.min(20, localThreshold || 5))
-            await saveAlertThreshold(threshold)
-            setSaved(true)
-            setTimeout(() => setSaved(false), 2000)
-        } catch (e) {
-            setSaveError(e instanceof Error ? e.message : '保存失败，请重试')
-        } finally {
-            setSaving(false)
-        }
-    }
+            if (threshold !== alertThreshold) {
+                setSaveStatus('saving')
+                await saveAlertThreshold(threshold)
+                showSaveFeedback('提醒阈值已保存')
+            }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localThreshold, alertThreshold, loaded, saveAlertThreshold, showSaveFeedback])
+
+    useEffect(() => {
+        const debounce = setTimeout(async () => {
+            try {
+                const savedProfile = await window.api.memory.updateInvestorProfile({
+                    capital: profile.capital,
+                    riskLevel: profile.riskLevel,
+                    preferredTypes: profile.preferredTypes,
+                    avoidTypes: profile.avoidTypes,
+                    preferredSectors: profile.preferredSectors,
+                    notes: profile.notes,
+                })
+                setProfile(savedProfile)
+            } catch (e) {
+                console.error('投资记忆保存失败:', e)
+            }
+        }, 800)
+        return () => clearTimeout(debounce)
+    }, [profile])
 
     return (
         <div className="page">
             <div className="page-header">
                 <h1 className="page-title">设置</h1>
+                <div className="settings-save-indicator">
+                    {saveStatus === 'saving' && (
+                        <span className="save-indicator saving">保存中...</span>
+                    )}
+                    {saveStatus === 'saved' && (
+                        <span className="save-indicator saved">{saveMessage}</span>
+                    )}
+                </div>
             </div>
 
             {/* 主题色 */}
@@ -211,6 +274,7 @@ export default function Settings() {
                             onClick={() => {
                                 applyTheme(t.id)
                                 setCurrentTheme(t.id)
+                                showSaveFeedback('主题已切换')
                             }}
                         >
                             <div className="theme-swatch-preview">
@@ -437,7 +501,9 @@ export default function Settings() {
                             className="input"
                             placeholder="例如：ST、北交所、科创板、高位追涨"
                             value={profile.avoidTypes}
-                            onChange={(e) => setProfile({ ...profile, avoidTypes: e.target.value })}
+                            onChange={(e) =>
+                                setProfile({ ...profile, avoidTypes: e.target.value })
+                            }
                         />
                     </div>
                     <div className="provider-field-row">
@@ -467,30 +533,7 @@ export default function Settings() {
                         上次更新：{profile.updatedAt}
                     </p>
                 )}
-                {profileError && (
-                    <div className="error-msg" style={{ marginBottom: 8 }}>
-                        {profileError}
-                    </div>
-                )}
-                <button
-                    className="btn-secondary"
-                    onClick={handleSaveProfile}
-                    disabled={profileSaving}
-                >
-                    {profileSaving ? '保存中...' : profileSaved ? '已保存 ✓' : '保存长期记忆'}
-                </button>
             </section>
-
-            <div className="settings-footer">
-                {saveError && (
-                    <div className="error-msg" style={{ marginBottom: 8 }}>
-                        {saveError}
-                    </div>
-                )}
-                <button className="btn-primary" onClick={handleSave} disabled={saving}>
-                    {saving ? '保存中...' : saved ? '已保存 ✓' : '保存设置'}
-                </button>
-            </div>
 
             <div className="disclaimer-box">
                 <strong>免责声明：</strong>

@@ -65,7 +65,7 @@ export default function RealtimeChart() {
         const saved = loadTodayPoints(code)
         setPoints(saved)
         fetchQuote()
-        timerRef.current = setInterval(fetchQuote, 5000)
+        timerRef.current = setInterval(fetchQuote, 3000)
         return () => {
             if (timerRef.current) clearInterval(timerRef.current)
         }
@@ -185,7 +185,7 @@ export default function RealtimeChart() {
                 <h1 className="page-title">
                     {name} ({code}) 实时走势
                 </h1>
-                <span className="quote-live-dot" title="每5秒刷新" />
+                <span className="quote-live-dot" title="每3秒刷新" />
             </div>
 
             {quote && (
@@ -218,7 +218,7 @@ export default function RealtimeChart() {
 
             {displayPoints.length < 2 ? (
                 <div className="loading" style={{ margin: '40px auto' }}>
-                    等待数据（每5秒更新一次）...
+                    等待数据（每3秒更新一次）...
                 </div>
             ) : (
                 <div style={{ margin: '12px 0' }}>

@@ -14,6 +14,9 @@ const api = {
         update: (id: number, costPrice: number, quantity: number) =>
             ipcRenderer.invoke('holdings:update', id, costPrice, quantity),
         delete: (id: number) => ipcRenderer.invoke('holdings:delete', id),
+        addTrade: (holdingId: number, tradeType: 'buy' | 'sell', costPrice: number, quantity: number, note?: string) =>
+            ipcRenderer.invoke('holdings:addTrade', holdingId, tradeType, costPrice, quantity, note),
+        getTrades: (holdingId: number) => ipcRenderer.invoke('holdings:getTrades', holdingId),
     },
 
     // Watchlist
@@ -22,6 +25,13 @@ const api = {
         add: (code: string, name: string, note?: string) =>
             ipcRenderer.invoke('watchlist:add', code, name, note),
         remove: (id: number) => ipcRenderer.invoke('watchlist:remove', id),
+        getGroups: () => ipcRenderer.invoke('watchlist:getGroups'),
+        addGroup: (name: string) => ipcRenderer.invoke('watchlist:addGroup', name),
+        removeGroup: (name: string) => ipcRenderer.invoke('watchlist:removeGroup', name),
+        setItemGroup: (itemId: number, groupName: string) =>
+            ipcRenderer.invoke('watchlist:setItemGroup', itemId, groupName),
+        getItemGroups: (): Promise<Array<[number, string]>> =>
+            ipcRenderer.invoke('watchlist:getItemGroups'),
     },
 
     // Market data

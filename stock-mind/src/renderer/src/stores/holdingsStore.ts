@@ -16,6 +16,7 @@ interface HoldingsState {
     addHolding: (code: string, name: string, costPrice: number, quantity: number) => Promise<void>
     updateHolding: (id: number, costPrice: number, quantity: number) => Promise<void>
     deleteHolding: (id: number) => Promise<void>
+    addTrade: (holdingId: number, tradeType: 'buy' | 'sell', costPrice: number, quantity: number, note?: string) => Promise<void>
 }
 
 export const useHoldingsStore = create<HoldingsState>((set, get) => ({
@@ -45,8 +46,9 @@ export const useHoldingsStore = create<HoldingsState>((set, get) => ({
             const updated = holdings.map((h) => {
                 const quote = quoteMap.get(h.code)
                 if (!quote) return h
-                const profit = (quote.price - h.cost_price) * h.quantity
-                const profitPercent = ((quote.price - h.cost_price) / h.cost_price) * 100
+                const costPrice = h.avg_cost_price ?? h.cost_price
+                const profit = (quote.price - costPrice) * h.quantity
+                const profitPercent = ((quote.price - costPrice) / costPrice) * 100
                 return { ...h, quote, profit, profitPercent }
             })
             set({ holdings: updated })
@@ -67,6 +69,11 @@ export const useHoldingsStore = create<HoldingsState>((set, get) => ({
 
     deleteHolding: async (id) => {
         await window.api.holdings.delete(id)
+        await get().fetchHoldings()
+    },
+
+    addTrade: async (holdingId, tradeType, costPrice, quantity, note) => {
+        await window.api.holdings.addTrade(holdingId, tradeType, costPrice, quantity, note)
         await get().fetchHoldings()
     },
 }))

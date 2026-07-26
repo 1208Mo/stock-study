@@ -4,63 +4,36 @@ import type { WatchItem, QuoteData } from '../types'
 interface WatchlistState {
     items: WatchItem[]
     quotes: Map<string, QuoteData>
-    groups: string[] // 自定义分组列表
-    itemGroups: Map<number, string> // itemId -> groupName
+    groups: string[]
+    itemGroups: Map<number, string>
     loading: boolean
     fetchWatchlist: () => Promise<void>
     refreshWatchlistQuotes: () => Promise<void>
     addItem: (code: string, name: string, note?: string) => Promise<void>
     removeItem: (id: number) => Promise<void>
     search: (keyword: string) => Promise<{ code: string; name: string }[]>
-    addGroup: (name: string) => void
-    removeGroup: (name: string) => void
-    setItemGroup: (id: number, group: string) => void
-}
-
-const GROUPS_KEY = 'watchlist_groups'
-const ITEM_GROUPS_KEY = 'watchlist_item_groups'
-
-function loadGroups(): string[] {
-    try {
-        return JSON.parse(localStorage.getItem(GROUPS_KEY) ?? '[]')
-    } catch {
-        return []
-    }
-}
-function saveGroups(groups: string[]) {
-    try {
-        localStorage.setItem(GROUPS_KEY, JSON.stringify(groups))
-    } catch {}
-}
-function loadItemGroups(): Map<number, string> {
-    try {
-        return new Map(
-            Object.entries(JSON.parse(localStorage.getItem(ITEM_GROUPS_KEY) ?? '{}')).map(
-                ([k, v]) => [parseInt(k), v as string]
-            )
-        )
-    } catch {
-        return new Map()
-    }
-}
-function saveItemGroups(m: Map<number, string>) {
-    try {
-        localStorage.setItem(ITEM_GROUPS_KEY, JSON.stringify(Object.fromEntries(m)))
-    } catch {}
+    addGroup: (name: string) => Promise<void>
+    removeGroup: (name: string) => Promise<void>
+    setItemGroup: (id: number, group: string) => Promise<void>
 }
 
 export const useWatchlistStore = create<WatchlistState>((set, get) => ({
     items: [],
     quotes: new Map(),
-    groups: loadGroups(),
-    itemGroups: loadItemGroups(),
+    groups: [],
+    itemGroups: new Map(),
     loading: false,
 
     fetchWatchlist: async () => {
         set({ loading: true })
         try {
-            const items = await window.api.watchlist.getAll()
-            set({ items, loading: false })
+            const [items, groups, itemGroupsArr] = await Promise.all([
+                window.api.watchlist.getAll(),
+                window.api.watchlist.getGroups(),
+                window.api.watchlist.getItemGroups(),
+            ])
+            const itemGroups = new Map(itemGroupsArr)
+            set({ items, groups, itemGroups, loading: false })
             get().refreshWatchlistQuotes()
         } catch (e) {
             console.error(e)
@@ -95,31 +68,24 @@ export const useWatchlistStore = create<WatchlistState>((set, get) => ({
         return window.api.market.search(keyword)
     },
 
-    addGroup: (name) => {
-        const groups = [...get().groups.filter((g) => g !== name), name]
-        saveGroups(groups)
+    addGroup: async (name) => {
+        await window.api.watchlist.addGroup(name)
+        const groups = await window.api.watchlist.getGroups()
         set({ groups })
     },
 
-    removeGroup: (name) => {
-        const groups = get().groups.filter((g) => g !== name)
-        const itemGroups = new Map(get().itemGroups)
-        for (const [k, v] of itemGroups.entries()) {
-            if (v === name) itemGroups.delete(k)
-        }
-        saveGroups(groups)
-        saveItemGroups(itemGroups)
-        set({ groups, itemGroups })
+    removeGroup: async (name) => {
+        await window.api.watchlist.removeGroup(name)
+        const [groups, itemGroupsArr] = await Promise.all([
+            window.api.watchlist.getGroups(),
+            window.api.watchlist.getItemGroups(),
+        ])
+        set({ groups, itemGroups: new Map(itemGroupsArr) })
     },
 
-    setItemGroup: (id, group) => {
-        const itemGroups = new Map(get().itemGroups)
-        if (group === '') {
-            itemGroups.delete(id)
-        } else {
-            itemGroups.set(id, group)
-        }
-        saveItemGroups(itemGroups)
-        set({ itemGroups })
+    setItemGroup: async (id, group) => {
+        await window.api.watchlist.setItemGroup(id, group)
+        const itemGroupsArr = await window.api.watchlist.getItemGroups()
+        set({ itemGroups: new Map(itemGroupsArr) })
     },
 }))

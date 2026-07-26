@@ -208,21 +208,34 @@ export default function StockDetail() {
                 <button className="btn-back" onClick={() => navigate(-1)}>
                     ← 返回
                 </button>
-                <h1 className="page-title">
-                    {name} ({code})
-                </h1>
-                {sectorInfo && (sectorInfo.sector || sectorInfo.subSector) && (
-                    <span className="sector-tag">
-                        {[sectorInfo.sector, sectorInfo.subSector].filter(Boolean).join(' · ')}
-                    </span>
-                )}
+                <div className="stock-header-info">
+                    <h1 className="page-title">
+                        {name} ({code})
+                    </h1>
+                    {sectorInfo && (sectorInfo.sector || sectorInfo.subSector) && (
+                        <div className="stock-header-tags">
+                            <span className="sector-tag">
+                                {[sectorInfo.sector, sectorInfo.subSector].filter(Boolean).join(' · ')}
+                            </span>
+                        </div>
+                    )}
+                </div>
                 {quote && (
-                    <div className="quote-summary">
-                        <span className="price">{quote.price}</span>
-                        <span className={`change ${quote.changePercent >= 0 ? 'up' : 'down'}`}>
-                            {quote.changePercent >= 0 ? '+' : ''}
-                            {quote.changePercent.toFixed(2)}%
-                        </span>
+                    <div className="stock-price-card">
+                        <div className="stock-price-main">
+                            <span className="price" style={{ color: quote.changePercent >= 0 ? 'var(--up)' : 'var(--down)' }}>
+                                {quote.price}
+                            </span>
+                            <span className={`change ${quote.changePercent >= 0 ? 'up' : 'down'}`}>
+                                {quote.changePercent >= 0 ? '+' : ''}
+                                {quote.changePercent.toFixed(2)}%
+                            </span>
+                        </div>
+                        <div className="stock-price-detail">
+                            <span>开 {quote.open}</span>
+                            <span>高 {quote.high}</span>
+                            <span>低 {quote.low}</span>
+                        </div>
                         <span className="quote-live-dot" title="实时行情（每5秒刷新）" />
                     </div>
                 )}

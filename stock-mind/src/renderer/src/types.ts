@@ -22,14 +22,26 @@ export interface KLineData {
     volume: number
 }
 
+export interface HoldingTrade {
+    id: number
+    holding_id: number
+    trade_type: 'buy' | 'sell'
+    cost_price: number
+    quantity: number
+    trade_date: string
+    note: string
+}
+
 export interface Holding {
     id: number
     code: string
     name: string
     cost_price: number
+    avg_cost_price?: number
     quantity: number
     created_at: string
     updated_at: string
+    trades?: HoldingTrade[]
 }
 
 export interface WatchItem {
@@ -150,6 +162,14 @@ declare global {
                 ) => Promise<unknown>
                 update: (id: number, costPrice: number, quantity: number) => Promise<unknown>
                 delete: (id: number) => Promise<unknown>
+                addTrade: (
+                    holdingId: number,
+                    tradeType: 'buy' | 'sell',
+                    costPrice: number,
+                    quantity: number,
+                    note?: string
+                ) => Promise<{ newQuantity: number; newAvgCost: number }>
+                getTrades: (holdingId: number) => Promise<HoldingTrade[]>
             }
             watchlist: {
                 getAll: () => Promise<WatchItem[]>
