@@ -39,17 +39,23 @@ function createWindow(): void {
 
 function createPetWindow(): void {
     petWindow = new BrowserWindow({
-        width: 120,
-        height: 140,
+        width: 160,
+        height: 200,
         transparent: true,
         frame: false,
         alwaysOnTop: true,
         skipTaskbar: true,
-        resizable: false,
+        resizable: true,
+        hasShadow: false,
+        show: false,
         webPreferences: {
             preload: join(__dirname, '../preload/index.js'),
             sandbox: false,
         },
+    })
+
+    petWindow.on('ready-to-show', () => {
+        petWindow?.show()
     })
 
     // 隐藏菜单栏
@@ -59,7 +65,7 @@ function createPetWindow(): void {
     const { screen } = require('electron')
     const primaryDisplay = screen.getPrimaryDisplay()
     const { width, height } = primaryDisplay.workAreaSize
-    petWindow.setPosition(width - 140, height - 180)
+    petWindow.setPosition(width - 200, height - 240)
 
     // 加载桌宠页面
     if (process.env['ELECTRON_RENDERER_URL']) {
@@ -143,6 +149,15 @@ ipcMain.handle('pet:getPosition', () => {
     return { x: 0, y: 0 }
 })
 
+// IPC: 调整桌宠窗口尺寸（滚轮缩放使用）
+ipcMain.handle('pet:resize', (_e, width: number, height: number) => {
+    if (!petWindow) return false
+    const w = Math.max(80, Math.min(600, Math.round(width)))
+    const h = Math.max(100, Math.min(720, Math.round(height)))
+    petWindow.setSize(w, h)
+    return true
+})
+
 app.whenReady().then(async () => {
     // 统一设置 appId，确保开发模式和生产模式使用同一个数据库路径
     app.setName('com.stockmind.app')
@@ -154,12 +169,13 @@ app.whenReady().then(async () => {
     registerAllIpcHandlers()
     startScheduler()
     createWindow()
-    createPetWindow()
+    // 桌宠暂时屏蔽（等待替换透明素材后再打开）
+    // createPetWindow()
 
     app.on('activate', function () {
         if (BrowserWindow.getAllWindows().length === 0) {
             createWindow()
-            createPetWindow()
+            // createPetWindow()
         }
     })
 })
