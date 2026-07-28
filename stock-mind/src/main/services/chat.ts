@@ -31,18 +31,23 @@ const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> 
     deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
     qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
     ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
+    volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
+    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2' },
 }
 
 // ─── 1. 创建 LLM 实例 ─────────────────────────────────────────────────────────
 function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model?: string) {
     const defaults = PROVIDER_DEFAULTS[provider]
+    // 兼容用户填入完整地址（含 /chat/completions），LangChain 会自动拼该后缀，需要去掉
+    let finalBaseUrl = baseUrl || defaults.baseUrl
+    finalBaseUrl = finalBaseUrl.replace(/\/chat\/completions\/?$/, '')
     return new ChatOpenAI({
         apiKey,
         model: model || defaults.model,
         temperature: 0.7,
         maxTokens: 2000,
         configuration: {
-            baseURL: baseUrl || defaults.baseUrl,
+            baseURL: finalBaseUrl,
         },
     })
 }

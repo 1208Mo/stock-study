@@ -30,6 +30,8 @@ const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> 
     deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
     qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
     ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
+    volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
+    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2' },
 }
 
 // ─── 1. 结构化输出定义 ───────────────────────────────────────────────────────
@@ -143,13 +145,15 @@ type DecisionStateType = typeof DecisionState.State
 // 文心同样支持 OpenAI 兼容端点（qianfan.baidubce.com/v2），无需单独 SDK
 function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model?: string) {
     const defaults = PROVIDER_DEFAULTS[provider]
+    let finalBaseUrl = baseUrl || defaults.baseUrl
+    finalBaseUrl = finalBaseUrl.replace(/\/chat\/completions\/?$/, '')
     return new ChatOpenAI({
         apiKey,
         model: model || defaults.model,
         temperature: 0.7,
         maxTokens: 2000,
         configuration: {
-            baseURL: baseUrl || defaults.baseUrl,
+            baseURL: finalBaseUrl,
         },
     })
 }

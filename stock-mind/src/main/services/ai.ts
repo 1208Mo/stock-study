@@ -1,4 +1,4 @@
-export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie' | 'volcengine'
+export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie' | 'volcengine' | 'zhipu'
 
 export interface AIMessage {
     role: 'system' | 'user' | 'assistant'
@@ -53,6 +53,7 @@ const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> 
     qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
     ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
     volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
+    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2' },
 }
 
 async function callOpenAICompatible(
@@ -65,8 +66,12 @@ async function callOpenAICompatible(
     const { default: axios } = await import('axios')
 
     try {
+        const normalizedUrl = baseUrl.replace(/\/$/, '')
+        const url = normalizedUrl.endsWith('/chat/completions')
+            ? normalizedUrl
+            : `${normalizedUrl}/chat/completions`
         const resp = await axios.post(
-            `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+            url,
             { model, messages, temperature: 0.7, max_tokens: 2000 },
             {
                 headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
