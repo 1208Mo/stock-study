@@ -72,7 +72,7 @@ async function callOpenAICompatible(
             : `${normalizedUrl}/chat/completions`
         const resp = await axios.post(
             url,
-            { model, messages, temperature: 0.7, max_tokens: 2000 },
+            { model, messages, temperature: 0.7, max_tokens: 16384 },
             {
                 headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
                 timeout: 60000,

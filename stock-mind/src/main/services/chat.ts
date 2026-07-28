@@ -45,7 +45,7 @@ function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model
         apiKey,
         model: model || defaults.model,
         temperature: 0.7,
-        maxTokens: 2000,
+        maxTokens: 16384,
         configuration: {
             baseURL: finalBaseUrl,
         },

@@ -73,7 +73,7 @@ function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model
         apiKey,
         model: model || defaults.model,
         temperature: 0.4,
-        maxTokens: 2200,
+        maxTokens: 16384,
         configuration: {
             baseURL: finalBaseUrl,
         },
@@ -238,9 +238,8 @@ export async function runResearchAgent(
     const toolCalls: ResearchToolTrace[] = []
     let finalContent = ''
     let aborted = false
+    let lastFinishReason: string | null = null
 
-    // 用 streamEvents 同时拿 token 流 + 工具调用轨迹
-    // 只喂本轮 user 消息，checkpointer 会自动把历史 messages 加载进 state
     try {
         const stream = agent.streamEvents(
             { messages: [new HumanMessage(params.input)] },
@@ -254,6 +253,22 @@ export async function runResearchAgent(
                 if (text) {
                     finalContent += text
                     onChunk?.(text)
+                }
+                const metadata = (chunk as { response_metadata?: { finish_reason?: string } })?.response_metadata
+                if (metadata?.finish_reason) {
+                    lastFinishReason = metadata.finish_reason
+                }
+            } else if (event.event === 'on_chat_model_end') {
+                const message = (event.data as { message?: BaseMessage })?.message
+                if (message && isAIMessage(message)) {
+                    const fullText = contentToText(message.content)
+                    if (fullText && fullText.length > finalContent.length) {
+                        const missingPart = fullText.slice(finalContent.length)
+                        finalContent = fullText
+                        if (missingPart) {
+                            onChunk?.(missingPart)
+                        }
+                    }
                 }
             } else if (event.event === 'on_tool_end') {
                 const output = (event.data as { output?: unknown; input?: unknown })?.output
