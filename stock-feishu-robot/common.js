@@ -87,12 +87,18 @@ async function fetchGlobalIndices() {
  * fs=m:90+t:2 => 行业板块；fields:
  *   f3=涨跌幅%  f12=板块代码  f14=板块名  f62=主力净流入(元)  f128=领涨股名  f184=主力净占比%
  * 返回四组视角：涨幅榜、跌幅榜、主力净流入榜、主力净流出榜（即资金"暗流"）
+ * 注意：使用 numeric 子域 + %2B 编码，避免边缘网关把 + 解码成空格
  */
 async function fetchSectorRanking() {
-    const url = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f3,f12,f14,f62,f128,f184";
+    const url = "https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A2&fields=f3,f12,f14,f62,f128,f184";
     try {
         const res = await fetchWithRetry(url, {
-            headers: { "Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0" }
+            headers: {
+                "Referer": "https://quote.eastmoney.com/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+            }
         });
         const data = await res.json();
         const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
@@ -122,10 +128,15 @@ async function fetchSectorRanking() {
  * fs=m:90+t:3 => 概念板块
  */
 async function fetchConceptRanking(count = 10) {
-    const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${count}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f3,f12,f14,f62,f128,f184`;
+    const url = `https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${count}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A3&fields=f3,f12,f14,f62,f128,f184`;
     try {
         const res = await fetchWithRetry(url, {
-            headers: { "Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0" }
+            headers: {
+                "Referer": "https://quote.eastmoney.com/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+            }
         });
         const data = await res.json();
         const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
