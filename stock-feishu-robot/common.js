@@ -2,10 +2,10 @@
 const WEBHOOK_URL = process.env.FEISHU_WEBHOOK;
 if (!WEBHOOK_URL) throw new Error("缺少环境变量 FEISHU_WEBHOOK");
 
-const ARK_API_KEY = process.env.ARK_API_KEY;
-if (!ARK_API_KEY) throw new Error("缺少环境变量 ARK_API_KEY");
-const ARK_MODEL = "deepseek-v4-pro-260425";
-const ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY;
+if (!ZHIPU_API_KEY) throw new Error("缺少环境变量 ZHIPU_API_KEY");
+const ZHIPU_MODEL = "glm-5.2";
+const ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 
 // ===================== 数据拉取 =====================
 
@@ -103,17 +103,17 @@ async function fetchEastMoneyAnn(count = 15) {
 
 // ===================== AI 调用 =====================
 
-/** 调用火山引擎 ARK（DeepSeek）*/
+/** 调用智谱 BigModel（GLM）*/
 async function callAI(prompt) {
     try {
-        const res = await fetchWithRetry(`${ARK_BASE_URL}/chat/completions`, {
+        const res = await fetchWithRetry(`${ZHIPU_BASE_URL}/chat/completions`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${ARK_API_KEY}`
+                "Authorization": `Bearer ${ZHIPU_API_KEY}`
             },
             body: JSON.stringify({
-                model: ARK_MODEL,
+                model: ZHIPU_MODEL,
                 messages: [{ role: "user", content: prompt }],
                 temperature: 0.3
             })

@@ -37,38 +37,15 @@ function getSinaSymbol(code: string): string {
 }
 
 // 东方财富实时行情
-// 注意：东方财富对不同证券类型返回的 f43 格式不一致：
-//   - 普通A股：f43 以"分"为单位，需要 /100
-//   - ETF/基金/低价股：f43 可能已经是实际价格
-// 通过 f170（涨跌幅）动态判断正确的缩放比例
-function determineScale(rawPrice: number, rawPrevClose: number, rawChangePercent: number | undefined): number {
-    if (rawPrevClose <= 0 || rawPrice <= 0) return 1
-
-    if (rawChangePercent != null && rawChangePercent !== undefined) {
-        // 用 f170（涨跌幅）交叉验证：计算两种缩放下的涨跌幅，哪个更接近 f170
-        const pCents = rawPrice / 100
-        const changePctCents = Math.abs((pCents - rawPrevClose) / rawPrevClose * 100)
-        const diffCents = Math.abs(changePctCents - Math.abs(rawChangePercent))
-
-        const changePctActual = Math.abs((rawPrice - rawPrevClose) / rawPrevClose * 100)
-        const diffActual = Math.abs(changePctActual - Math.abs(rawChangePercent))
-
-        // 差值更小的那个就是正确的缩放
-        return diffCents < diffActual ? 100 : 1
-    }
-
-    // 没有 f170 时，用价格合理性判断：
-    // 如果 rawPrice / rawPrevClose 接近 100 倍或更多，说明 rawPrice 是分
-    const ratio = rawPrice / rawPrevClose
-    if (ratio > 50 || ratio < 0.02) return 100
-    return 1
-}
-
+// 价格字段（f43/f44/f45/f46/f60）都是整数，真实价格 = 原值 / 10^f59
+//   - 股票/指数：f59 = 2（如贵州茅台 f43=132946 → 1329.46）
+//   - ETF/基金：f59 = 3（如 510760 f43=1268 → 1.268）
+// 涨跌幅 f170 同理按 f152 位小数缩放（f152=2 时 -39 → -0.39%）
 async function fetchQuoteFromEastmoney(code: string): Promise<QuoteData> {
     const url = `https://push2.eastmoney.com/api/qt/stock/get`
     const params = {
         secid: getSecid(code),
-        fields: 'f43,f44,f45,f46,f47,f48,f57,f58,f60,f170',
+        fields: 'f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f152,f170',
         ut: 'bd1d9ddb04089700cf9c27f6f7426281',
     }
 
@@ -77,13 +54,16 @@ async function fetchQuoteFromEastmoney(code: string): Promise<QuoteData> {
 
     if (!d || !d.f43) throw new Error(`eastmoney: no data for ${code}`)
 
-    const scale = determineScale(d.f43, d.f60, d.f170)
+    const decimals = typeof d.f59 === 'number' ? d.f59 : 2
+    const scale = Math.pow(10, decimals)
     const price = d.f43 / scale
     const prevClose = d.f60 / scale
-    const change = parseFloat((price - prevClose).toFixed(2))
-    const changePercent = prevClose > 0
-        ? parseFloat(((change / prevClose) * 100).toFixed(2))
-        : 0
+    const change = parseFloat((price - prevClose).toFixed(decimals))
+    const changePercent = typeof d.f170 === 'number'
+        ? d.f170 / Math.pow(10, typeof d.f152 === 'number' ? d.f152 : 2)
+        : prevClose > 0
+            ? parseFloat(((change / prevClose) * 100).toFixed(2))
+            : 0
 
     return {
         code,
@@ -129,43 +109,22 @@ async function fetchQuoteFromSina(code: string): Promise<QuoteData> {
     const volume = parseFloat(parts[8])
     const amount = parseFloat(parts[9])
 
-    // 新浪接口对于部分股票（如ETF、基金）可能返回乘以100的数据
-    // 通过验证价格合理性来判断是否需要除以100
-    let scale = 1
-    if (prevClose > 0 && price > 0) {
-        const rawChangePercent = Math.abs((price - prevClose) / prevClose * 100)
-        // 如果涨跌幅超过20%，很可能是数据被放大了100倍
-        // （正常股票单日涨跌幅不会超过20%，除非是新股/复牌）
-        if (rawChangePercent > 20) {
-            scale = 100
-        }
-        // 额外检查：如果价格远高于合理范围（如普通A股价格>5000元），也可能需要缩放
-        if (scale === 1 && price > 5000) {
-            scale = 100
-        }
-    }
-
-    const adjustedPrice = price / scale
-    const adjustedPrevClose = prevClose / scale
-    const adjustedOpen = open / scale
-    const adjustedHigh = high / scale
-    const adjustedLow = low / scale
-
-    const change = parseFloat((adjustedPrice - adjustedPrevClose).toFixed(2))
+    // 新浪返回的就是真实价格，无需缩放
+    const change = parseFloat((price - prevClose).toFixed(3))
     const changePercent =
-        adjustedPrevClose > 0
-            ? parseFloat(((change / adjustedPrevClose) * 100).toFixed(2))
+        prevClose > 0
+            ? parseFloat((((price - prevClose) / prevClose) * 100).toFixed(2))
             : 0
 
     return {
         code,
         name,
-        price: adjustedPrice,
+        price,
         change,
         changePercent,
-        open: adjustedOpen,
-        high: adjustedHigh,
-        low: adjustedLow,
+        open,
+        high,
+        low,
         volume,
         amount,
         timestamp: new Date().toISOString(),
