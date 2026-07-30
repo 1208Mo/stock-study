@@ -43,6 +43,33 @@ async function fetchWithRetry(url, options = {}, { retries = 3, timeoutMs = 8000
     throw lastErr;
 }
 
+/** 东财 push2 域名池——同一份数据在多个 numeric 子域负载均衡，
+ *  某个节点 502/fetch failed 是常态，需要在多个子域间轮询。 */
+const EM_PUSH_HOSTS = ["82.push2.eastmoney.com", "1.push2.eastmoney.com", "29.push2.eastmoney.com", "push2.eastmoney.com"];
+
+/** 依次尝试多个候选 URL（不同 host），任一成功即返回；全部失败才抛出最后一个错误。 */
+async function fetchWithHostFallback(pathAndQuery, options = {}, retryOpts = { retries: 2, timeoutMs: 8000, retryDelayMs: 1500 }) {
+    let lastErr;
+    for (const host of EM_PUSH_HOSTS) {
+        const url = `https://${host}${pathAndQuery}`;
+        try {
+            return await fetchWithRetry(url, options, retryOpts);
+        } catch (e) {
+            lastErr = e;
+            console.warn(`[hostFallback] ${host} 失败：${e.message}，切换下一个子域`);
+        }
+    }
+    throw lastErr;
+}
+
+/** 浏览器指纹头，尽量降低被东财 CDN 识别为 bot 的概率 */
+const EM_HEADERS = {
+    "Referer": "https://quote.eastmoney.com/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+};
+
 /** 新浪财经快讯 */
 async function fetchSinaNews(count = 20) {
     const url = `https://zhibo.sina.com.cn/api/zhibo/feed?zhibo_id=152&tag_id=0&page=1&page_size=${count}&type=0&tabtype=0`;
@@ -90,16 +117,9 @@ async function fetchGlobalIndices() {
  * 注意：使用 numeric 子域 + %2B 编码，避免边缘网关把 + 解码成空格
  */
 async function fetchSectorRanking() {
-    const url = "https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A2&fields=f3,f12,f14,f62,f128,f184";
+    const pathAndQuery = "/api/qt/clist/get?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A2&fields=f3,f12,f14,f62,f128,f184";
     try {
-        const res = await fetchWithRetry(url, {
-            headers: {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-            }
-        });
+        const res = await fetchWithHostFallback(pathAndQuery, { headers: EM_HEADERS });
         const data = await res.json();
         const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
         if (!list.length) throw new Error("行业板块数据为空");
@@ -128,16 +148,9 @@ async function fetchSectorRanking() {
  * fs=m:90+t:3 => 概念板块
  */
 async function fetchConceptRanking(count = 10) {
-    const url = `https://82.push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${count}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A3&fields=f3,f12,f14,f62,f128,f184`;
+    const pathAndQuery = `/api/qt/clist/get?pn=1&pz=${count}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m%3A90%2Bt%3A3&fields=f3,f12,f14,f62,f128,f184`;
     try {
-        const res = await fetchWithRetry(url, {
-            headers: {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "*/*",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-            }
-        });
+        const res = await fetchWithHostFallback(pathAndQuery, { headers: EM_HEADERS });
         const data = await res.json();
         const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
         if (!list.length) throw new Error("概念板块数据为空");
