@@ -4,9 +4,9 @@ on:
   schedule:
     # 北京时间 = UTC+8，GitHub Actions 用 UTC
     # 说明：整点 cron 排队严重（延迟 10~30min），一律用非整点、偏移到目标时间之前几分钟
-    - cron: '57 22 * * 0-4'  # 早报 BJT 06:57（UTC 前一天 22:57）
+    - cron: '7 23 * * 0-4'   # 早报 BJT 07:07（UTC 前一天 23:07）
     - cron: '17 1 * * 1-5'   # 午报 BJT 09:17
-    - cron: '17 6 * * 1-5'   # 晚报 BJT 14:17
+    - cron: '47 6 * * 1-5'   # 晚报 BJT 14:47
 
   workflow_dispatch:
 
@@ -14,7 +14,7 @@ jobs:
   morning:
     name: 早报
     runs-on: ubuntu-latest
-    if: github.event.schedule == '57 22 * * 0-4' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '7 23 * * 0-4' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +56,7 @@ jobs:
   evening:
     name: 晚报
     runs-on: ubuntu-latest
-    if: github.event.schedule == '17 6 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '47 6 * * 1-5' || github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4

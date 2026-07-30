@@ -83,6 +83,62 @@ async function fetchGlobalIndices() {
     }
 }
 
+/** 东方财富：行业板块涨跌 + 主力资金流向
+ * fs=m:90+t:2 => 行业板块；fields:
+ *   f3=涨跌幅%  f12=板块代码  f14=板块名  f62=主力净流入(元)  f128=领涨股名  f184=主力净占比%
+ * 返回四组视角：涨幅榜、跌幅榜、主力净流入榜、主力净流出榜（即资金"暗流"）
+ */
+async function fetchSectorRanking() {
+    const url = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f3,f12,f14,f62,f128,f184";
+    try {
+        const res = await fetchWithRetry(url, {
+            headers: { "Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0" }
+        });
+        const data = await res.json();
+        const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
+        if (!list.length) throw new Error("行业板块数据为空");
+
+        const yi = (n) => (typeof n === "number" ? (n / 1e8).toFixed(2) + "亿" : "-");
+        const pct = (n) => (typeof n === "number" ? (n >= 0 ? "+" : "") + n.toFixed(2) + "%" : "-");
+        const fmtByChange = (x) => `${x.f14}: ${pct(x.f3)}  主力${yi(x.f62)}  领涨:${x.f128 || "-"}`;
+        const fmtByFlow   = (x) => `${x.f14}: 主力${yi(x.f62)}  涨跌${pct(x.f3)}  领涨:${x.f128 || "-"}`;
+
+        const byChange = [...list].sort((a, b) => b.f3 - a.f3);
+        const byFlow   = [...list].sort((a, b) => (b.f62 || 0) - (a.f62 || 0));
+
+        return {
+            top:     byChange.slice(0, 8).map(fmtByChange).join("\n"),
+            bottom:  byChange.slice(-5).reverse().map(fmtByChange).join("\n"),
+            inflow:  byFlow.slice(0, 5).map(fmtByFlow).join("\n"),
+            outflow: byFlow.slice(-5).reverse().map(fmtByFlow).join("\n"),
+        };
+    } catch (e) {
+        _pushFetchError("行业板块涨跌/资金", e);
+        return null;
+    }
+}
+
+/** 东方财富：概念板块涨幅榜（"暗流"更容易冒头的地方）
+ * fs=m:90+t:3 => 概念板块
+ */
+async function fetchConceptRanking(count = 10) {
+    const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=${count}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f3,f12,f14,f62,f128,f184`;
+    try {
+        const res = await fetchWithRetry(url, {
+            headers: { "Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0" }
+        });
+        const data = await res.json();
+        const list = (data.data?.diff || []).filter(x => typeof x.f3 === "number");
+        if (!list.length) throw new Error("概念板块数据为空");
+        const yi = (n) => (typeof n === "number" ? (n / 1e8).toFixed(2) + "亿" : "-");
+        const pct = (n) => (typeof n === "number" ? (n >= 0 ? "+" : "") + n.toFixed(2) + "%" : "-");
+        return list.map(x => `${x.f14}: ${pct(x.f3)}  主力${yi(x.f62)}  领涨:${x.f128 || "-"}`).join("\n");
+    } catch (e) {
+        _pushFetchError("概念板块涨幅", e);
+        return null;
+    }
+}
+
 /** 东财上市公司公告标题 */
 async function fetchEastMoneyAnn(count = 15) {
     const url = `https://np-anotice-stock.eastmoney.com/api/security/ann?cb=&page_index=1&page_size=${count}&ann_type=SHA,CYB,SZA,BJA&client_source=web&stock_list=`;
@@ -103,7 +159,7 @@ async function fetchEastMoneyAnn(count = 15) {
 
 // ===================== AI 调用 =====================
 
-/** 调用智谱 BigModel（GLM）*/
+/** 调用智谱 BigModel（GLM），启用 web_search 工具让模型能联网检索 */
 async function callAI(prompt) {
     try {
         const res = await fetchWithRetry(`${ZHIPU_BASE_URL}/chat/completions`, {
@@ -115,7 +171,10 @@ async function callAI(prompt) {
             body: JSON.stringify({
                 model: ZHIPU_MODEL,
                 messages: [{ role: "user", content: prompt }],
-                temperature: 0.3
+                temperature: 0.3,
+                // 开启智谱内置联网检索：让模型自主拉取最新公开网页信息作为参考
+                // 覆盖不到微信公众号，但能补充券商研报、财联社、雪球等公开源
+                tools: [{ type: "web_search", web_search: { enable: true } }]
             })
         }, { retries: 2, timeoutMs: 60000, retryDelayMs: 2000 });
         const result = await res.json();
@@ -159,4 +218,4 @@ async function sendFeishuCard({ title, template = "blue", content }) {
     console.log("推送结果：", result);
 }
 
-module.exports = { fetchSinaNews, fetchEastMoneyAnn, fetchGlobalIndices, callAI, sendFeishuCard, getFetchErrors, resetFetchErrors };
+module.exports = { fetchSinaNews, fetchEastMoneyAnn, fetchGlobalIndices, fetchSectorRanking, fetchConceptRanking, callAI, sendFeishuCard, getFetchErrors, resetFetchErrors };
