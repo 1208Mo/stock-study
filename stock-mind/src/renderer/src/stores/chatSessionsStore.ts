@@ -8,7 +8,7 @@
  *   chat_sessions（元数据）+ chat_messages（UI 展示消息）+ chat_checkpoints/writes（Agent 状态）
  */
 import { create } from 'zustand'
-import type { ChatSessionMeta, ChatMessageRow, ResearchToolTrace } from '../types'
+import type { ChatSessionMeta, ChatMessageRow, ResearchToolTrace, ImageContent } from '../types'
 
 export interface ChatMessage {
     role: 'user' | 'assistant'
@@ -16,6 +16,7 @@ export interface ChatMessage {
     pending?: boolean
     stopped?: boolean
     toolCalls?: ResearchToolTrace[]
+    images?: ImageContent[]
 }
 
 interface ChatSessionsState {
@@ -50,10 +51,19 @@ function rowToMessage(row: ChatMessageRow): ChatMessage {
             /* ignore */
         }
     }
+    let images: ImageContent[] | undefined
+    if (row.images) {
+        try {
+            images = JSON.parse(row.images) as ImageContent[]
+        } catch {
+            /* ignore */
+        }
+    }
     return {
         role: row.role === 'user' ? 'user' : 'assistant',
         content: row.content,
         toolCalls,
+        images,
     }
 }
 

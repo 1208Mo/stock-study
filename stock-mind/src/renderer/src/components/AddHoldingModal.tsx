@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { useHoldingsStore } from '../stores/holdingsStore'
+import NumberInput from './NumberInput'
 import type { Holding } from '../types'
 
 interface Props {
@@ -36,12 +37,14 @@ function parseCodesFromText(
 }
 
 export default function AddHoldingModal({ onClose, editingHolding, tradingHolding }: Props) {
-    const { addHolding, updateHolding, addTrade } = useHoldingsStore()
+    const { addHolding, updateHolding, updateSector, addTrade } = useHoldingsStore()
     const isEdit = !!editingHolding
     const isTrade = !!tradingHolding
     const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy')
     const [code, setCode] = useState(editingHolding?.code ?? tradingHolding?.code ?? '')
     const [name, setName] = useState(editingHolding?.name ?? tradingHolding?.name ?? '')
+    const [sector, setSector] = useState(editingHolding?.sector ?? '')
+    const [subSector, setSubSector] = useState(editingHolding?.sub_sector ?? '')
     const [costPrice, setCostPrice] = useState(
         editingHolding ? String(editingHolding.cost_price) : ''
     )
@@ -51,6 +54,7 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
     const [tradeNote, setTradeNote] = useState('')
     const [searching, setSearching] = useState(false)
     const [searchResults, setSearchResults] = useState<{ code: string; name: string }[]>([])
+    const [searchDone, setSearchDone] = useState(false)
     const [error, setError] = useState('')
     const [submitting, setSubmitting] = useState(false)
 
@@ -69,14 +73,19 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
         if (!keyword || isEdit) return
         setSearching(true)
         setSearchResults([])
+        setSearchDone(false)
         try {
             const results = await window.api.market.search(keyword)
             if (results.length === 1) {
-                // 唯一匹配，直接填入
                 setCode(results[0].code)
                 setName(results[0].name)
+                setSearchDone(true)
+                fetchSectorFor(results[0].code)
             } else if (results.length > 1) {
                 setSearchResults(results.slice(0, 8))
+                setSearchDone(true)
+            } else {
+                setSearchDone(true)
             }
         } catch (e) {
             console.error(e)
@@ -85,10 +94,22 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
         }
     }
 
+    // 自动获取板块信息，失败时静默留空（东方财富接口可能被反爬限制）
+    async function fetchSectorFor(stockCode: string) {
+        try {
+            const info = await window.api.market.getSectorInfo(stockCode)
+            if (info.sector) setSector(info.sector)
+            if (info.subSector) setSubSector(info.subSector)
+        } catch {
+            // 接口失败，留空让用户手动填写
+        }
+    }
+
     function handlePickResult(r: { code: string; name: string }) {
         setCode(r.code)
         setName(r.name)
         setSearchResults([])
+        fetchSectorFor(r.code)
     }
 
     async function handleSubmit() {
@@ -168,8 +189,10 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
         try {
             if (isEdit && editingHolding) {
                 await updateHolding(editingHolding.id, cp, qty)
+                // 同步保存板块信息
+                await updateSector(editingHolding.id, sector, subSector)
             } else {
-                await addHolding(code, name, cp, qty)
+                await addHolding(code, name, cp, qty, sector, subSector)
             }
             onClose()
         } catch (e: unknown) {
@@ -207,7 +230,17 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                 }
                 const cp = item.costPrice ?? 0
                 const qty = item.quantity && item.quantity % 100 === 0 ? item.quantity : 100
-                await addHolding(item.code, resolvedName, cp, qty)
+                // 批量导入也尝试获取板块（失败留空）
+                let bSector = ''
+                let bSubSector = ''
+                try {
+                    const info = await window.api.market.getSectorInfo(item.code)
+                    bSector = info.sector || ''
+                    bSubSector = info.subSector || ''
+                } catch {
+                    // 接口失败留空
+                }
+                await addHolding(item.code, resolvedName, cp, qty, bSector, bSubSector)
                 ok++
             } catch {
                 fail++
@@ -282,14 +315,12 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                         {/* 交易数量 */}
                         <div className="form-row">
                             <label className="label">交易数量 (股)</label>
-                            <input
-                                className="input"
-                                type="number"
-                                step="100"
-                                min="100"
+                            <NumberInput
+                                step={100}
+                                min={100}
                                 placeholder={`如：1000（当前持仓 ${tradingHolding.quantity} 股）`}
                                 value={tradeQuantity}
-                                onChange={(e) => setTradeQuantity(e.target.value)}
+                                onChange={setTradeQuantity}
                             />
                             <span className="input-hint">1手=100股，最少填100</span>
                         </div>
@@ -298,13 +329,11 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                         {tradeType === 'buy' && (
                             <div className="form-row">
                                 <label className="label">买入成本价 (元)</label>
-                                <input
-                                    className="input"
-                                    type="number"
-                                    step="0.01"
+                                <NumberInput
+                                    step={0.01}
                                     placeholder="如：10.50"
                                     value={tradeCostPrice}
-                                    onChange={(e) => setTradeCostPrice(e.target.value)}
+                                    onChange={setTradeCostPrice}
                                 />
                             </div>
                         )}
@@ -383,6 +412,7 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                                     onChange={(e) => {
                                         setCode(e.target.value)
                                         setSearchResults([])
+                                        setSearchDone(false)
                                     }}
                                     onBlur={() => {
                                         if (!searchResults.length) handleSearchCode()
@@ -400,21 +430,33 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                                         {searching ? '搜索...' : '搜索'}
                                     </button>
                                 )}
-                                {searchResults.length > 0 && (
+                                {(searchResults.length > 0 || searchDone) && (
                                     <div className="stock-search-dropdown">
-                                        {searchResults.map((r) => (
-                                            <div
-                                                key={r.code}
-                                                className="stock-search-option"
-                                                onMouseDown={(e) => {
-                                                    e.preventDefault()
-                                                    handlePickResult(r)
-                                                }}
-                                            >
-                                                <span className="stock-code">{r.code}</span>
-                                                <span className="stock-name">{r.name}</span>
+                                        {searching ? (
+                                            <div className="stock-search-empty">搜索中...</div>
+                                        ) : searchResults.length > 0 ? (
+                                            searchResults.map((r) => (
+                                                <div
+                                                    key={r.code}
+                                                    className="stock-search-option"
+                                                    onMouseDown={(e) => {
+                                                        e.preventDefault()
+                                                        handlePickResult(r)
+                                                    }}
+                                                >
+                                                    <span className="stock-code">{r.code}</span>
+                                                    <span className="stock-name">{r.name}</span>
+                                                </div>
+                                            ))
+                                        ) : code && name ? (
+                                            <div className="stock-search-empty stock-search-hint">
+                                                已匹配：{code} {name}
                                             </div>
-                                        ))}
+                                        ) : (
+                                            <div className="stock-search-empty">
+                                                未找到相关股票，请尝试其他关键词
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -431,27 +473,40 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                         </div>
 
                         <div className="form-row">
+                            <label className="label">板块 / 细分板块</label>
+                            <div className="sector-display">
+                                {sector ? (
+                                    <span className="sector-chip filled">{sector}</span>
+                                ) : null}
+                                {subSector ? (
+                                    <span className="sector-chip filled">{subSector}</span>
+                                ) : null}
+                                {!sector && !subSector && (
+                                    <span className="sector-empty-hint">
+                                        搜索代码后自动获取
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="form-row">
                             <label className="label">成本价 (元)</label>
-                            <input
-                                className="input"
-                                type="number"
-                                step="0.01"
+                            <NumberInput
+                                step={0.01}
                                 placeholder="如：10.50"
                                 value={costPrice}
-                                onChange={(e) => setCostPrice(e.target.value)}
+                                onChange={setCostPrice}
                             />
                         </div>
 
                         <div className="form-row">
                             <label className="label">持仓量 (股)</label>
-                            <input
-                                className="input"
-                                type="number"
-                                step="100"
-                                min="100"
+                            <NumberInput
+                                step={100}
+                                min={100}
                                 placeholder="如：1000（必须是100的整数倍）"
                                 value={quantity}
-                                onChange={(e) => setQuantity(e.target.value)}
+                                onChange={setQuantity}
                             />
                             <span className="input-hint">1手=100股，最少填100</span>
                         </div>

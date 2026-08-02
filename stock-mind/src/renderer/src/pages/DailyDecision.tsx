@@ -9,8 +9,10 @@ import type {
     StructuredDecision,
     AgentDiagnostics,
     AmbushSector,
+    MarketRegime,
 } from '../types'
 import { computePriceLevels } from '../utils/priceLevels'
+import DecisionHistory from './DecisionHistory'
 
 type RiskLevel = '稳一点' | '平衡' | '激进'
 
@@ -118,7 +120,55 @@ function savePref(key: string, value: unknown) {
     } catch {}
 }
 
+// 市场状态横幅：进攻/防守/空仓三色，展示客观指标结论与建议仓位
+function RegimeBanner({ regime }: { regime: MarketRegime }) {
+    const meta: Record<
+        MarketRegime['regime'],
+        { label: string; cls: string; emoji: string }
+    > = {
+        offensive: { label: '进攻', cls: 'regime-badge offensive', emoji: '🚀' },
+        defensive: { label: '防守', cls: 'regime-badge defensive', emoji: '🛡️' },
+        cash: { label: '空仓', cls: 'regime-badge cash', emoji: '💰' },
+    }
+    const m = meta[regime.regime] ?? meta.defensive
+    const sh = regime.indicators.shIndex
+    const fmtPct = (v: number | null, withSign = true) => {
+        if (v === null) return '—'
+        const sign = withSign && v > 0 ? '+' : ''
+        return `${sign}${v.toFixed(2)}%`
+    }
+    return (
+        <div className={`regime-banner ${regime.regime}`}>
+            <div className="regime-banner-head">
+                <span className={m.cls}>
+                    {m.emoji} 市场状态：{m.label}
+                </span>
+                <span className="regime-score">得分 {regime.score}</span>
+                <span className="regime-suggest">
+                    建议仓位上限 {(regime.suggestedMaxPositionRatio * 100).toFixed(0)}% · 候选数{' '}
+                    {regime.suggestedCandidateCount}
+                </span>
+                {regime.regime === 'cash' && (
+                    <span className="regime-cash-warn">已跳过选股，建议观望</span>
+                )}
+            </div>
+            <div className="regime-rationale">{regime.rationale}</div>
+            <div className="regime-metrics">
+                <span>
+                    上证 {fmtPct(sh.todayChangePct)} · MA5 {sh.ma5?.toFixed(0) ?? '—'} · MA20{' '}
+                    {sh.ma20?.toFixed(0) ?? '—'} ·{' '}
+                    {sh.aboveMa20 === null ? '—' : sh.aboveMa20 ? '站上MA20' : '跌破MA20'} · 5日{' '}
+                    {fmtPct(sh.ret5d)} · 量比 {sh.volumeRatio?.toFixed(2) ?? '—'}
+                </span>
+            </div>
+        </div>
+    )
+}
+
 export default function DailyDecision() {
+    const [tab, setTab] = useState<'today' | 'memory'>(() =>
+        loadPref<'today' | 'memory'>('tab', 'today')
+    )
     const [capital, setCapital] = useState(() => loadPref<number>('capital', 7000))
     const [capitalInput, setCapitalInput] = useState(() =>
         String(loadPref<number>('capital', 7000))
@@ -134,6 +184,7 @@ export default function DailyDecision() {
     const [marketContext, setMarketContext] = useState('')
     const [structuredDecision, setStructuredDecision] = useState<StructuredDecision | null>(null)
     const [agentDiagnostics, setAgentDiagnostics] = useState<AgentDiagnostics | null>(null)
+    const [marketRegime, setMarketRegime] = useState<MarketRegime | null>(null)
     const [loading, setLoading] = useState(false)
     const [refreshing, setRefreshing] = useState(false)
     const [loadingStep, setLoadingStep] = useState('')
@@ -206,14 +257,17 @@ export default function DailyDecision() {
                     return { name: s.name, code: s.code, changePercent: s.changePercent, klines }
                 })
             )
+            type SectorTrendItem = {
+                name: string
+                code: string
+                changePercent: number
+                klines: KLineData[]
+            }
             setSectorTrends(
                 results
                     .filter(
-                        (
-                            r
-                        ): r is PromiseFulfilledResult<
-                            (typeof results)[0] extends PromiseFulfilledResult<infer T> ? T : never
-                        > => r.status === 'fulfilled'
+                        (r): r is PromiseFulfilledResult<SectorTrendItem> =>
+                            r.status === 'fulfilled'
                     )
                     .map((r) => r.value)
                     .filter((s) => s.klines.length > 0)
@@ -300,6 +354,7 @@ export default function DailyDecision() {
         setMarketContext('')
         setStructuredDecision(null)
         setAgentDiagnostics(null)
+        setMarketRegime(null)
         setRuleResult('')
         setFailedCodes([])
 
@@ -318,6 +373,7 @@ export default function DailyDecision() {
                 setAiResult(result.decision)
                 setStructuredDecision(result.structuredDecision)
                 setAgentDiagnostics(result.diagnostics)
+                setMarketRegime(result.marketRegime)
                 if (result.quotes && result.quotes.length > 0) {
                     const klineMap = await fetchCandidateKlines(result.quotes.map((q) => q.code))
                     setCandidates(
@@ -442,6 +498,31 @@ export default function DailyDecision() {
 
     return (
         <div className="daily-decision-page">
+            <div className="decision-tabs">
+                <button
+                    className={`decision-tab ${tab === 'today' ? 'active' : ''}`}
+                    onClick={() => {
+                        setTab('today')
+                        savePref('tab', 'today')
+                    }}
+                >
+                    今日决策
+                </button>
+                <button
+                    className={`decision-tab ${tab === 'memory' ? 'active' : ''}`}
+                    onClick={() => {
+                        setTab('memory')
+                        savePref('tab', 'memory')
+                    }}
+                >
+                    决策记忆 & 命中追踪
+                </button>
+            </div>
+
+            {tab === 'memory' ? (
+                <DecisionHistory />
+            ) : (
+                <>
             <div className="page-header">
                 <div>
                     <h1>每日 AI 决策</h1>
@@ -492,6 +573,8 @@ export default function DailyDecision() {
                     </div>
                 </div>
             </div>
+
+            {marketRegime && <RegimeBanner regime={marketRegime} />}
 
             <div className="decision-layout">
                 <section className="decision-panel">
@@ -856,6 +939,8 @@ export default function DailyDecision() {
                     ))}
                 </div>
             </section>
+                </>
+            )}
         </div>
     )
 }

@@ -9,10 +9,12 @@ const api = {
     // Holdings
     holdings: {
         getAll: () => ipcRenderer.invoke('holdings:getAll'),
-        add: (code: string, name: string, costPrice: number, quantity: number) =>
-            ipcRenderer.invoke('holdings:add', code, name, costPrice, quantity),
+        add: (code: string, name: string, costPrice: number, quantity: number, sector?: string, subSector?: string) =>
+            ipcRenderer.invoke('holdings:add', code, name, costPrice, quantity, sector, subSector),
         update: (id: number, costPrice: number, quantity: number) =>
             ipcRenderer.invoke('holdings:update', id, costPrice, quantity),
+        updateSector: (id: number, sector: string, subSector: string) =>
+            ipcRenderer.invoke('holdings:updateSector', id, sector, subSector),
         delete: (id: number) => ipcRenderer.invoke('holdings:delete', id),
         addTrade: (holdingId: number, tradeType: 'buy' | 'sell', costPrice: number, quantity: number, note?: string) =>
             ipcRenderer.invoke('holdings:addTrade', holdingId, tradeType, costPrice, quantity, note),
@@ -22,8 +24,10 @@ const api = {
     // Watchlist
     watchlist: {
         getAll: () => ipcRenderer.invoke('watchlist:getAll'),
-        add: (code: string, name: string, note?: string) =>
-            ipcRenderer.invoke('watchlist:add', code, name, note),
+        add: (code: string, name: string, note?: string, sector?: string, subSector?: string) =>
+            ipcRenderer.invoke('watchlist:add', code, name, note, sector, subSector),
+        updateSector: (id: number, sector: string, subSector: string) =>
+            ipcRenderer.invoke('watchlist:updateSector', id, sector, subSector),
         remove: (id: number) => ipcRenderer.invoke('watchlist:remove', id),
         getGroups: () => ipcRenderer.invoke('watchlist:getGroups'),
         addGroup: (name: string) => ipcRenderer.invoke('watchlist:addGroup', name),
@@ -48,6 +52,8 @@ const api = {
             ipcRenderer.invoke('market:getIntraday', code, bars),
         getNews: (count?: number) => ipcRenderer.invoke('market:getNews', count),
         getTopSectors: (topN?: number) => ipcRenderer.invoke('market:getTopSectors', topN),
+        getTopSectorTrends: (topN?: number, days?: number) =>
+            ipcRenderer.invoke('market:getTopSectorTrends', topN, days),
         getDynamicCandidates: (topSectorCount?: number, perSector?: number) =>
             ipcRenderer.invoke('market:getDynamicCandidates', topSectorCount, perSector),
         getAmbushSectors: (limit?: number) =>
@@ -57,6 +63,17 @@ const api = {
         getSectorKLine: (bkCode: string, days?: number) =>
             ipcRenderer.invoke('market:getSectorKLine', bkCode, days),
         getDividends: (code: string) => ipcRenderer.invoke('market:getDividends', code),
+        getCapitalFlowDaily: (code: string, days?: number, market?: 'sh' | 'sz') =>
+            ipcRenderer.invoke('market:getCapitalFlowDaily', code, days, market),
+        getDailyKLine: (code: string, days?: number, market?: 'sh' | 'sz') =>
+            ipcRenderer.invoke('market:getDailyKLine', code, days, market),
+        getSectorCapitalFlow: (topN?: number) =>
+            ipcRenderer.invoke('market:getSectorCapitalFlow', topN),
+        getMarketFlowSnapshot: () => ipcRenderer.invoke('market:getMarketFlowSnapshot'),
+        getSectorTopStocks: (bkCode: string, topN?: number) =>
+            ipcRenderer.invoke('market:getSectorTopStocks', bkCode, topN),
+        getFundamentals: (code: string) =>
+            ipcRenderer.invoke('market:getFundamentals', code),
     },
 
     // Settings
@@ -155,7 +172,7 @@ const api = {
         chat: (payload: { messages: Array<{ role: string; content: string }> }) =>
             ipcRenderer.invoke('ai:chat', payload),
         // 流式对话（Step 4：以 sessionId 为 thread_id，历史由 checkpointer 管理）
-        chatStream: (payload: { sessionId: string; input: string }, requestId: string) =>
+        chatStream: (payload: { sessionId: string; input: string; images?: Array<{ id: string; dataUrl: string; name: string; type: string }> }, requestId: string) =>
             ipcRenderer.send('ai:chat:start', { ...payload, requestId }),
         chatStop: (requestId: string) => ipcRenderer.send('ai:chat:stop', { requestId }),
         onChatChunk: (
@@ -185,6 +202,13 @@ const api = {
             const handler = (_e: Electron.IpcRendererEvent, data: { requestId: string; error: string }) => cb(data)
             ipcRenderer.on('ai:chat:error', handler)
             return () => ipcRenderer.removeListener('ai:chat:error', handler)
+        },
+        onChatAnalyzing: (
+            cb: (data: { requestId: string; message: string }) => void
+        ): (() => void) => {
+            const handler = (_e: Electron.IpcRendererEvent, data: { requestId: string; message: string }) => cb(data)
+            ipcRenderer.on('ai:chat:analyzing', handler)
+            return () => ipcRenderer.removeListener('ai:chat:analyzing', handler)
         },
     },
 
@@ -217,6 +241,15 @@ const api = {
             sessionId: string
         ): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> =>
             ipcRenderer.invoke('chat:restoreFromCheckpoint', sessionId),
+    },
+
+    // Decision history & hit tracking
+    decision: {
+        list: (limit?: number) => ipcRenderer.invoke('decision:list', limit),
+        getById: (id: number) => ipcRenderer.invoke('decision:getById', id),
+        stats: (days?: number) => ipcRenderer.invoke('decision:stats', days),
+        review: (decisionId?: number) => ipcRenderer.invoke('decision:review', decisionId),
+        delete: (id: number) => ipcRenderer.invoke('decision:delete', id),
     },
 }
 

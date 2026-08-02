@@ -1,6 +1,7 @@
 import cron from 'node-cron'
 import { fetchBatchQuotes } from './market'
 import { getAllHoldings } from '../db'
+import { runPendingDecisionReviews } from './decisionReview'
 import { Notification } from 'electron'
 
 export function startScheduler(): void {
@@ -27,6 +28,25 @@ export function startScheduler(): void {
         '5 15 * * 1-5',
         async () => {
             await sendPostMarketSummary()
+        },
+        { timezone: 'Asia/Shanghai' }
+    )
+
+    // 盘后决策复盘 — 工作日 15:10（比收盘总结晚5分钟，确保当日K线落盘）
+    cron.schedule(
+        '10 15 * * 1-5',
+        async () => {
+            try {
+                const r = await runPendingDecisionReviews()
+                if (r.decisions > 0) {
+                    new Notification({
+                        title: 'StockMind — 决策复盘完成',
+                        body: `复盘 ${r.decisions} 条决策：${r.reviewed} 只成功，${r.failed} 只失败待重试`,
+                    }).show()
+                }
+            } catch (e) {
+                console.error('Decision review error:', e)
+            }
         },
         { timezone: 'Asia/Shanghai' }
     )

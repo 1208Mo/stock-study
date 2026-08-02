@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useWatchlistStore } from '../stores/watchlistStore'
+import type { WatchItem } from '../types'
 
 // 从文本中解析股票代码
 function parseCodesFromText(text: string): string[] {
@@ -27,13 +28,13 @@ export default function Watchlist() {
         search,
         groups,
         itemGroups,
-        addGroup,
-        removeGroup,
         setItemGroup,
+        updateSector,
     } = useWatchlistStore()
     const [keyword, setKeyword] = useState('')
     const [searchResults, setSearchResults] = useState<{ code: string; name: string }[]>([])
     const [searching, setSearching] = useState(false)
+    const [searchDone, setSearchDone] = useState(false)
     const navigate = useNavigate()
 
     // 批量导入
@@ -43,8 +44,37 @@ export default function Watchlist() {
     const [batchMsg, setBatchMsg] = useState('')
 
     // 分组管理
-    const [newGroupName, setNewGroupName] = useState('')
-    const [activeGroup, setActiveGroup] = useState<string>('全部')
+    const [activeGroup, setActiveGroup] = useState<string>('')
+    const [sectorRefreshing, setSectorRefreshing] = useState(false)
+    // 首次加载后自动补全缺失板块的自选股，无需用户手动点"刷新板块"
+    const autoFillSectorRef = useRef(false)
+    const [sectorFilter, setSectorFilter] = useState<string>('全部')
+
+    // 批量刷新所有自选股的板块-细分板块（直接调 IPC，最后统一 reload）
+    async function handleRefreshSectors() {
+        if (sectorRefreshing || items.length === 0) return
+        setSectorRefreshing(true)
+        try {
+            for (let i = 0; i < items.length; i += 4) {
+                const batch = items.slice(i, i + 4)
+                await Promise.all(
+                    batch.map(async (it) => {
+                        try {
+                            const info = await window.api.market.getSectorInfo(it.code)
+                            if (info.sector || info.subSector) {
+                                await window.api.watchlist.updateSector(it.id, info.sector, info.subSector)
+                            }
+                        } catch {
+                            // ignore single failure
+                        }
+                    })
+                )
+            }
+            await fetchWatchlist()
+        } finally {
+            setSectorRefreshing(false)
+        }
+    }
 
     useEffect(() => {
         fetchWatchlist()
@@ -55,12 +85,46 @@ export default function Watchlist() {
         return () => clearInterval(timer)
     }, [])
 
+    // 自动补全缺失板块（sector 与 sub_sector 均为空）的自选股，首次加载静默执行一次
+    useEffect(() => {
+        if (autoFillSectorRef.current) return
+        if (loading || items.length === 0) return
+        const missing = items.filter((it) => !it.sector && !it.sub_sector)
+        if (missing.length === 0) return
+        autoFillSectorRef.current = true
+        ;(async () => {
+            setSectorRefreshing(true)
+            try {
+                for (let i = 0; i < missing.length; i += 4) {
+                    const batch = missing.slice(i, i + 4)
+                    await Promise.all(
+                        batch.map(async (it) => {
+                            try {
+                                const info = await window.api.market.getSectorInfo(it.code)
+                                if (info.sector || info.subSector) {
+                                    await window.api.watchlist.updateSector(it.id, info.sector, info.subSector)
+                                }
+                            } catch {
+                                // ignore single failure
+                            }
+                        })
+                    )
+                }
+                await fetchWatchlist()
+            } finally {
+                setSectorRefreshing(false)
+            }
+        })()
+    }, [items, loading])
+
     async function handleSearch() {
         if (!keyword.trim()) return
         setSearching(true)
+        setSearchDone(false)
         try {
             const results = await search(keyword)
             setSearchResults(results)
+            setSearchDone(true)
         } catch (e) {
             console.error(e)
         } finally {
@@ -69,9 +133,28 @@ export default function Watchlist() {
     }
 
     async function handleAdd(code: string, name: string) {
-        await addItem(code, name)
+        // 添加自选股时自动获取板块信息（失败留空）
+        let sector = ''
+        let subSector = ''
+        try {
+            const info = await window.api.market.getSectorInfo(code)
+            sector = info.sector || ''
+            subSector = info.subSector || ''
+        } catch {
+            // 接口失败留空
+        }
+        await addItem(code, name, undefined, sector, subSector)
         setSearchResults([])
         setKeyword('')
+    }
+
+    // 点击板块标签编辑（自选股无编辑 modal，用 prompt 轻量实现）
+    async function handleEditSector(item: WatchItem) {
+        const newSector = window.prompt('请输入板块（如：科技）', item.sector ?? '')
+        if (newSector === null) return
+        const newSubSector = window.prompt('请输入细分板块（如：半导体）', item.sub_sector ?? '')
+        if (newSubSector === null) return
+        await updateSector(item.id, newSector.trim(), newSubSector.trim())
     }
 
     function handleBatchTextChange(text: string) {
@@ -90,7 +173,17 @@ export default function Watchlist() {
             try {
                 const results = await window.api.market.search(code).catch(() => [])
                 const name = results[0]?.name || code
-                await addItem(code, name)
+                // 批量导入也尝试获取板块（失败留空）
+                let sector = ''
+                let subSector = ''
+                try {
+                    const info = await window.api.market.getSectorInfo(code)
+                    sector = info.sector || ''
+                    subSector = info.subSector || ''
+                } catch {
+                    // 接口失败留空
+                }
+                await addItem(code, name, undefined, sector, subSector)
                 ok++
             } catch {
                 fail++
@@ -102,21 +195,45 @@ export default function Watchlist() {
         setBatchParsed([])
     }
 
-    const visibleItems =
-        activeGroup === '全部'
+    // 按板块筛选（叠加在自定义分组筛选之上）
+    const sectorKey = (s?: string) => (s && s.trim()) || '未分类'
+    const sectorCounts = useMemo(() => {
+        const map = new Map<string, number>()
+        for (const it of items) {
+            const k = sectorKey(it.sector)
+            map.set(k, (map.get(k) ?? 0) + 1)
+        }
+        return [...map.entries()].sort((a, b) => b[1] - a[1])
+    }, [items])
+    const groupFiltered =
+        activeGroup === ''
             ? items
             : items.filter((item) => itemGroups.get(item.id) === activeGroup)
+    const visibleItems =
+        sectorFilter === '全部'
+            ? groupFiltered
+            : groupFiltered.filter((item) => sectorKey(item.sector) === sectorFilter)
 
     return (
         <div className="page">
             <div className="page-header">
                 <h1 className="page-title">观察列表</h1>
                 <span className="quote-live-dot" title="行情每5秒自动刷新" />
+                <div className="page-header-actions">
+                    <button
+                        className="btn-secondary"
+                        onClick={handleRefreshSectors}
+                        disabled={sectorRefreshing || items.length === 0}
+                        title="重新获取所有自选股的板块-细分板块"
+                    >
+                        {sectorRefreshing ? '刷新中...' : '刷新板块'}
+                    </button>
+                </div>
             </div>
 
             {/* 分组标签栏 */}
             <div className="watchlist-groups">
-                {['全部', ...groups].map((g) => (
+                {groups.map((g) => (
                     <button
                         key={g}
                         className={`btn-day ${activeGroup === g ? 'active' : ''}`}
@@ -125,51 +242,36 @@ export default function Watchlist() {
                         {g}
                     </button>
                 ))}
-                <div className="group-add-inline">
-                    <input
-                        className="input group-name-input"
-                        placeholder="新分组名"
-                        value={newGroupName}
-                        onChange={(e) => setNewGroupName(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && newGroupName.trim()) {
-                                addGroup(newGroupName.trim())
-                                setNewGroupName('')
-                            }
-                        }}
-                    />
-                    <button
-                        className="btn-small"
-                        onClick={() => {
-                            if (newGroupName.trim()) {
-                                addGroup(newGroupName.trim())
-                                setNewGroupName('')
-                            }
-                        }}
-                    >
-                        + 新建
-                    </button>
-                    {activeGroup !== '全部' && (
-                        <button
-                            className="btn-danger-small"
-                            onClick={() => {
-                                removeGroup(activeGroup)
-                                setActiveGroup('全部')
-                            }}
-                            title="删除该分组"
-                        >
-                            删除分组
-                        </button>
-                    )}
-                </div>
+
             </div>
+
+            {/* 板块筛选（叠加在自定义分组之上） */}
+            {items.length > 0 && (
+                <div className="sector-chips">
+                    <button
+                        className={`sector-chip ${sectorFilter === '全部' ? 'active' : ''}`}
+                        onClick={() => setSectorFilter('全部')}
+                    >
+                        全部 <span className="chip-count">{items.length}</span>
+                    </button>
+                    {sectorCounts.map(([name, count]) => (
+                        <button
+                            key={name}
+                            className={`sector-chip ${sectorFilter === name ? 'active' : ''}`}
+                            onClick={() => setSectorFilter(name)}
+                        >
+                            {name} <span className="chip-count">{count}</span>
+                        </button>
+                    ))}
+                </div>
+            )}
 
             <div className="search-bar">
                 <input
                     className="input"
                     placeholder="搜索股票代码或名称..."
                     value={keyword}
-                    onChange={(e) => setKeyword(e.target.value)}
+                    onChange={(e) => { setKeyword(e.target.value); setSearchDone(false) }}
                     onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                 />
                 <button className="btn-primary" onClick={handleSearch} disabled={searching}>
@@ -212,17 +314,25 @@ export default function Watchlist() {
                 )}
             </div>
 
-            {searchResults.length > 0 && (
+            {(searchResults.length > 0 || searchDone) && (
                 <div className="search-results">
-                    {searchResults.map((r) => (
-                        <div key={r.code} className="search-result-item">
-                            <span className="stock-code">{r.code}</span>
-                            <span className="stock-name">{r.name}</span>
-                            <button className="btn-small" onClick={() => handleAdd(r.code, r.name)}>
-                                + 加入观察
-                            </button>
+                    {searching ? (
+                        <div className="stock-search-empty">搜索中...</div>
+                    ) : searchResults.length > 0 ? (
+                        searchResults.map((r) => (
+                            <div key={r.code} className="search-result-item">
+                                <span className="stock-code">{r.code}</span>
+                                <span className="stock-name">{r.name}</span>
+                                <button className="btn-small" onClick={() => handleAdd(r.code, r.name)}>
+                                    + 加入观察
+                                </button>
+                            </div>
+                        ))
+                    ) : (
+                        <div className="stock-search-empty">
+                            未找到相关股票，请尝试其他关键词
                         </div>
-                    ))}
+                    )}
                 </div>
             )}
 
@@ -231,7 +341,7 @@ export default function Watchlist() {
             ) : visibleItems.length === 0 ? (
                 <div className="empty-state">
                     <p>
-                        {activeGroup === '全部'
+                        {activeGroup === ''
                             ? '观察列表为空，搜索股票添加'
                             : `"${activeGroup}"分组为空`}
                     </p>
@@ -254,6 +364,18 @@ export default function Watchlist() {
                                 <div className="stock-info">
                                     <span className="stock-code">{item.code}</span>
                                     <span className="stock-name">{item.name}</span>
+                                    {(item.sector || item.sub_sector) && (
+                                        <span
+                                            className="sector-tag"
+                                            title="点击编辑板块"
+                                            onClick={(e) => {
+                                                e.stopPropagation()
+                                                handleEditSector(item)
+                                            }}
+                                        >
+                                            {[item.sector, item.sub_sector].filter(Boolean).join(' · ')}
+                                        </span>
+                                    )}
                                     {currentGroup && (
                                         <span className="watchlist-group-badge">
                                             {currentGroup}

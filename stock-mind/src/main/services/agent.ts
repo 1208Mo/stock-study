@@ -23,6 +23,9 @@ import {
 } from './market'
 import type { QuoteData } from './market'
 import type { AIProvider } from './ai'
+import { formatHoldingsSummary } from '../db'
+import { assessMarketRegime, type MarketRegime } from './marketRegime'
+import { fetchFundamentals, fundamentalsToCompactLine } from './fundamentals'
 
 // 与 ai.ts 保持一致
 const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> = {
@@ -79,6 +82,7 @@ const DecisionState = Annotation.Root({
     capital: Annotation<number>({ reducer: (_: number, b: number) => b, default: () => 5000 }),
     riskLevel: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '平衡' }),
     userProfile: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
+    holdingsSummary: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
     headlines: Annotation<string[]>({
         reducer: (_: string[], b: string[]) => b,
         default: () => [],
@@ -91,6 +95,10 @@ const DecisionState = Annotation.Root({
         default: () => [],
     }),
     marketContext: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
+    marketRegime: Annotation<MarketRegime | null>({
+        reducer: (_: MarketRegime | null, b: MarketRegime | null) => b,
+        default: () => null,
+    }),
     candidateCodes: Annotation<Array<{ code: string; name: string }>>({
         reducer: (
             _: Array<{ code: string; name: string }>,
@@ -204,7 +212,10 @@ const decisionTemplate = ChatPromptTemplate.fromMessages([
 4. 单标的 positionAmount 不超过 maxPositionPerTarget。
 5. action 只能是 "watch" 或 "avoid"，不允许输出直接买入指令。
 6. 所有价格字段必须使用候选池里已经给出的价位，不要自行编造。
-7. 用户画像只代表长期偏好和约束，不代表市场事实。`,
+7. 用户画像只代表长期偏好和约束，不代表市场事实。
+8. 用户当前持仓是本地记录的事实。若候选标的已被用户持有，优先给"加仓/减仓/持有观察"建议而非新建仓，并在 reason 里说明；若候选与已持仓标的同属一个行业且该行业已高配，应在 reason 里提示行业集中度风险。
+9. 今日市场状态（marketRegime）是客观指标的硬约束：defensive 态应偏谨慎、仓位靠下限、reason 提示防守；cash 态不会进入此节点（已提前观望）。不要与 marketRegime 的结论冲突。
+10. 候选标的基本面（PE/PB/ROE/毛利率/营收净利同比等）是客观财务数据：优先选 ROE 稳定、毛利率高、营收净利正增长的标的；回避 PE 极高且成长停滞甚至负增长的标的。在 reason 里结合基本面说明取舍理由（如"PE 22 倍处于合理区间，ROE 30%+ 盈利能力强"）。基本面数据缺失时不要编造，按技术面决策。`,
     ],
     [
         'human',
@@ -213,11 +224,18 @@ const decisionTemplate = ChatPromptTemplate.fromMessages([
 用户长期投资画像：
 {userProfile}
 
+用户当前持仓（成本口径，不含实时价）：
+{holdingsSummary}
+
 今日市场背景：{marketContext}
+今日市场状态（客观指标，硬约束）：{marketRegime}
 单标的最大仓位：{maxPosition} 元
 
 风控提示：
 {riskWarnings}
+
+候选标的基本面（客观财务数据，供参考）：
+{fundamentals}
 
 有效候选池：
 {candidates}
@@ -234,7 +252,7 @@ const decisionTemplate = ChatPromptTemplate.fromMessages([
       "action": "watch | avoid",
       "code": "股票代码",
       "name": "股票名称",
-      "reason": "基于这只标的自身数据的理由",
+      "reason": "基于这只标的自身数据的理由；若用户已持有，说明是加仓/减仓/持有观察建议",
       "aggressiveEntry": 0,
       "conservativeEntry": 0,
       "stopLoss": 0,
@@ -297,6 +315,50 @@ async function nodesFetchNews(state: DecisionStateType): Promise<Partial<Decisio
     return {
         headlines: headlines.status === 'fulfilled' ? headlines.value : [],
         topSectors: topSectors.status === 'fulfilled' ? topSectors.value : [],
+    }
+}
+
+// 空指标占位，用于 regime 判断失败时的兜底
+function emptyIndexIndicators(name: string, code: string): MarketRegime['indicators']['shIndex'] {
+    return {
+        name, code, price: null, todayChangePct: null, ma5: null, ma20: null,
+        aboveMa20: null, ma5AboveMa20: null, ret5d: null, ret20d: null, volumeRatio: null,
+    }
+}
+
+function defensiveRegimeFallback(reason: string): MarketRegime {
+    return {
+        regime: 'defensive',
+        score: 0,
+        indicators: {
+            shIndex: emptyIndexIndicators('上证指数', '000001'),
+            szIndex: emptyIndexIndicators('创业板指', '399006'),
+        },
+        rationale: `市场状态判断失败：${reason}，按防守态处理（仓位上限 15%）。`,
+        suggestedMaxPositionRatio: 0.15,
+        suggestedCandidateCount: 2,
+    }
+}
+
+// 市场状态判断节点（纯规则，非 LLM）：判进攻/防守/空仓三态
+// assessMarketRegime 内部已对数据源失败降级，此处 try/catch 为最后兜底
+async function nodeAssessMarketRegime(
+    state: DecisionStateType
+): Promise<Partial<DecisionStateType>> {
+    try {
+        const regime = await assessMarketRegime()
+        return {
+            marketRegime: regime,
+            workflowNotes: [
+                `市场状态判断：${regime.regime}（得分 ${regime.score}），建议仓位上限 ${(regime.suggestedMaxPositionRatio * 100).toFixed(0)}%、候选数 ${regime.suggestedCandidateCount}。${regime.rationale}`,
+            ],
+        }
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return {
+            marketRegime: defensiveRegimeFallback(msg),
+            workflowNotes: [`市场状态判断异常，降级防守：${msg}`],
+        }
     }
 }
 
@@ -474,6 +536,29 @@ async function nodeRiskCheck(state: DecisionStateType): Promise<Partial<Decision
     }
 }
 
+// 空仓态节点：跳过选股与 LLM 决策，直接输出观望
+// 当 marketRegime.regime === 'cash' 时由条件边路由到此
+async function nodeCashObserve(
+    state: DecisionStateType
+): Promise<Partial<DecisionStateType>> {
+    const regime = state.marketRegime
+    const observeReason = regime?.rationale ?? '市场破位下行，建议空仓观望，今日不开新仓。'
+    const structuredDecision: StructuredDecision = {
+        summary: '市场状态为空仓态，今日建议观望，不开新仓。',
+        marketBias: 'negative',
+        maxPositionPerTarget: 0,
+        observeReason,
+        picks: [],
+    }
+    return {
+        // 用 regime 说明作为市场背景，供前端展示与落库
+        marketContext: regime?.rationale ?? '市场状态判断为空仓态，跳过选股。',
+        decision: renderStructuredDecision(structuredDecision),
+        structuredDecision,
+        workflowNotes: ['市场状态为 cash（空仓态），跳过选股与 AI 决策，直接输出观望。'],
+    }
+}
+
 function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
     const chain = RunnableSequence.from([decisionTemplate, llm, new StringOutputParser()])
 
@@ -481,7 +566,10 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
         state: DecisionStateType
     ): Promise<Partial<DecisionStateType>> {
         const capital = state.capital ?? 5000
-        const maxPosition = Math.round(capital * 0.2)
+        const regime = state.marketRegime
+        // 仓位上限由市场状态动态决定（regime 缺失时回退 0.2）
+        const positionRatio = regime?.suggestedMaxPositionRatio ?? 0.2
+        const maxPosition = Math.round(capital * positionRatio)
 
         if (state.filteredQuotes.length === 0) {
             const structuredDecision: StructuredDecision = {
@@ -500,7 +588,11 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
             return { decision: renderStructuredDecision(structuredDecision), structuredDecision }
         }
 
-        const candidateLines = state.filteredQuotes
+        // 候选数按 regime 上限截断（防守态减半，进攻态满额）
+        const candidateCap = regime?.suggestedCandidateCount ?? state.filteredQuotes.length
+        const quotedCandidates = state.filteredQuotes.slice(0, Math.max(0, candidateCap))
+
+        const candidateLines = quotedCandidates
             .map((q: QuoteData) => {
                 const prices = calcReferencePrices(q)
                 return `${q.code} ${q.name}
@@ -510,17 +602,36 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
             })
             .join('\n\n')
 
+        // 为最终候选并行拉取基本面（失败静默跳过，不阻塞决策）
+        const fundamentalsResults = await Promise.allSettled(
+            quotedCandidates.map((q: QuoteData) => fetchFundamentals(q.code))
+        )
+        const fundamentalsLines: string[] = []
+        for (const r of fundamentalsResults) {
+            if (r.status === 'fulfilled' && r.value.reportDate !== null) {
+                fundamentalsLines.push(fundamentalsToCompactLine(r.value))
+            }
+        }
+        const fundamentalsBlock =
+            fundamentalsLines.length > 0 ? fundamentalsLines.join('\n') : '无基本面数据'
+
         const riskLevel = state.riskLevel ?? '平衡'
+        const regimeSummary = regime
+            ? `${regime.regime}（得分 ${regime.score}）：${regime.rationale}`
+            : '未判断市场状态'
         const result = await chain.invoke({
             capital,
             riskLevel,
             userProfile: state.userProfile || '未设置长期投资画像',
+            holdingsSummary: state.holdingsSummary || '无持仓',
             marketContext: state.marketContext || '无市场背景',
+            marketRegime: regimeSummary,
             riskWarnings:
                 state.riskWarnings.length > 0
                     ? state.riskWarnings.map((item, i) => `${i + 1}. ${item}`).join('\n')
                     : '无',
             candidates: candidateLines,
+            fundamentals: fundamentalsBlock,
             maxPosition,
         })
 
@@ -544,7 +655,9 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
 async function nodeValidateDecision(state: DecisionStateType): Promise<Partial<DecisionStateType>> {
     const issues: string[] = []
     const decision = state.structuredDecision
-    const maxPosition = Math.round((state.capital ?? 5000) * 0.2)
+    // 与 makeDecision 保持一致的 regime 口径仓位上限
+    const positionRatio = state.marketRegime?.suggestedMaxPositionRatio ?? 0.2
+    const maxPosition = Math.round((state.capital ?? 5000) * positionRatio)
     const validCodes = new Set(state.filteredQuotes.map((q: QuoteData) => q.code))
 
     if (!decision) {
@@ -600,6 +713,7 @@ export function buildDecisionGraph(
     const graph = new StateGraph(DecisionState)
         // 注册节点
         .addNode('fetchNews', nodesFetchNews)
+        .addNode('marketRegime', nodeAssessMarketRegime)
         .addNode('analyzeMarket', buildAnalyzeMarketNode(llm))
         .addNode('discoverCandidates', nodeDiscoverCandidates)
         .addNode('fetchQuotes', nodesFetchQuotes)
@@ -607,10 +721,15 @@ export function buildDecisionGraph(
         .addNode('riskCheck', nodeRiskCheck)
         .addNode('makeDecision', buildMakeDecisionNode(llm))
         .addNode('validateDecision', nodeValidateDecision)
+        .addNode('cashObserve', nodeCashObserve)
 
         // 定义边（执行顺序）
         .addEdge('__start__', 'fetchNews')
-        .addEdge('fetchNews', 'analyzeMarket')
+        .addEdge('fetchNews', 'marketRegime')
+        // 市场状态判断后条件分流：cash 态跳过选股直接观望，否则走完整流程
+        .addConditionalEdges('marketRegime', (state) =>
+            state.marketRegime?.regime === 'cash' ? 'cashObserve' : 'analyzeMarket'
+        )
         .addEdge('analyzeMarket', 'discoverCandidates')
         .addEdge('discoverCandidates', 'fetchQuotes')
         .addEdge('fetchQuotes', 'technicalFilter')
@@ -618,6 +737,7 @@ export function buildDecisionGraph(
         .addEdge('riskCheck', 'makeDecision')
         .addEdge('makeDecision', 'validateDecision')
         .addEdge('validateDecision', END)
+        .addEdge('cashObserve', END)
 
     return graph.compile()
 }
@@ -641,6 +761,7 @@ export interface AgentDecisionOutput {
     structuredDecision: StructuredDecision | null
     quotes: QuoteData[]
     diagnostics: AgentDiagnostics
+    marketRegime: MarketRegime | null
 }
 
 export async function runDecisionAgent(input: AgentDecisionInput): Promise<AgentDecisionOutput> {
@@ -651,6 +772,7 @@ export async function runDecisionAgent(input: AgentDecisionInput): Promise<Agent
         capital: input.capital ?? 5000,
         riskLevel: input.riskLevel ?? '平衡',
         userProfile: input.userProfile ?? '',
+        holdingsSummary: formatHoldingsSummary(),
         candidateCodes: input.candidateCodes,
     })
 
@@ -668,5 +790,6 @@ export async function runDecisionAgent(input: AgentDecisionInput): Promise<Agent
             quoteCount: result.quotes?.length || 0,
             filteredQuoteCount: result.filteredQuotes?.length || 0,
         },
+        marketRegime: result.marketRegime || null,
     }
 }

@@ -339,35 +339,58 @@ export interface StockSectorInfo {
     subSector: string // 细分板块（如"半导体"）
 }
 
-// 东方财富板块信息（f127=所属行业、f136=细分）
+// 东方财富板块信息
+// 优先 push2 的 f127(所属行业)/f136(细分)；该接口被反爬时降级用 F10 公司概况的
+// EM2016 行业分类（emweb.eastmoney.com 域名未被反爬，格式如"电子设备-半导体-集成电路"）
 export async function fetchSectorInfo(code: string): Promise<StockSectorInfo> {
-    const url = 'https://push2.eastmoney.com/api/qt/stock/get'
-    const params = {
-        secid: getSecid(code.trim()),
-        fields: 'f127,f136',
-        ut: 'bd1d9ddb04089700cf9c27f6f7426281',
-    }
-    const headers = {
-        'User-Agent':
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Referer: 'https://quote.eastmoney.com/',
-    }
+    const clean = code.trim()
+    const secid = getSecid(clean)
+    const ua =
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-    let lastErr: unknown
-    for (let i = 0; i < 3; i++) {
-        try {
-            const resp = await axios.get(url, { params, timeout: 8000, headers })
-            const d = resp.data?.data ?? {}
-            return {
-                sector: d.f127 || '',
-                subSector: d.f136 || '',
+    // 1. 东财 push2（f127=所属行业、f136=细分）
+    if (secid) {
+        for (let i = 0; i < 2; i++) {
+            try {
+                const resp = await axios.get('https://push2.eastmoney.com/api/qt/stock/get', {
+                    params: { secid, fields: 'f127,f136', ut: 'bd1d9ddb04089700cf9c27f6f7426281' },
+                    timeout: 8000,
+                    headers: { 'User-Agent': ua, Referer: 'https://quote.eastmoney.com/' },
+                })
+                const d = resp.data?.data ?? {}
+                if (d.f127 || d.f136) {
+                    return { sector: d.f127 || '', subSector: d.f136 || '' }
+                }
+                break // 被反爬返回空数据，转降级
+            } catch {
+                if (i < 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)))
             }
-        } catch (err) {
-            lastErr = err
-            if (i < 2) await new Promise((r) => setTimeout(r, 500 * (i + 1)))
         }
     }
-    throw lastErr
+
+    // 2. 降级：东财 F10 公司概况（emweb 域名未被反爬），取 EM2016 行业分类
+    const symbol = getSinaSymbol(clean) // sh600519 / sz000001
+    try {
+        const resp = await axios.get(
+            'https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax',
+            {
+                params: { code: symbol },
+                timeout: 8000,
+                headers: { 'User-Agent': ua, Referer: 'https://emweb.securities.eastmoney.com/' },
+            }
+        )
+        const em2016: string | undefined = resp.data?.jbzl?.[0]?.EM2016
+        if (em2016) {
+            const parts = em2016.split('-').map((s) => s.trim()).filter(Boolean)
+            return {
+                sector: parts[0] ?? '',
+                subSector: parts.slice(1).join('-'),
+            }
+        }
+    } catch {
+        // ignore
+    }
+    return { sector: '', subSector: '' }
 }
 
 // 东方财富分红数据（近几年分红记录）
@@ -377,6 +400,7 @@ export interface DividendRecord {
     divPerShare: number
     exDivDate: string
     recordDate: string
+    planText?: string // 分红方案说明，如 "10派0.908元(含税,扣税后0.8172元)"
 }
 
 export async function fetchDividends(code: string): Promise<DividendRecord[]> {
@@ -386,8 +410,8 @@ export async function fetchDividends(code: string): Promise<DividendRecord[]> {
         sortTypes: '-1',
         pageSize: 10,
         pageNumber: 1,
-        reportName: 'RPT_SHAREHOLDER_ALLOTMENT',
-        columns: 'REPORT_DATE,PER_SHARE_PRETAX_BONUS,EX_DIVIDEND_DATE,EQUITY_DATE',
+        reportName: 'RPT_SHAREBONUS_DET',
+        columns: 'REPORT_DATE,PRETAX_BONUS_RMB,EX_DIVIDEND_DATE,EQUITY_RECORD_DATE,IMPL_PLAN_PROFILE',
         filter: `(SECURITY_CODE="${code.trim()}")`,
         source: 'HSF',
         client: 'PC',
@@ -395,19 +419,21 @@ export async function fetchDividends(code: string): Promise<DividendRecord[]> {
     try {
         const resp = await axios.get(url, { params, timeout: 6000 })
         const rows: Array<{
-            REPORT_DATE: string
-            PER_SHARE_PRETAX_BONUS: number | null
+            REPORT_DATE: string | null
+            PRETAX_BONUS_RMB: number | null // 每10股派息(税前)，需 /10 转每股
             EX_DIVIDEND_DATE: string | null
-            EQUITY_DATE: string | null
+            EQUITY_RECORD_DATE: string | null
+            IMPL_PLAN_PROFILE?: string | null
         }> = resp.data?.result?.data ?? []
         return rows
-            .filter((r) => r.PER_SHARE_PRETAX_BONUS != null && r.PER_SHARE_PRETAX_BONUS > 0)
+            .filter((r) => r.PRETAX_BONUS_RMB != null && r.PRETAX_BONUS_RMB > 0)
             .map((r) => ({
                 year: (r.REPORT_DATE ?? '').slice(0, 4),
                 reportDate: (r.REPORT_DATE ?? '').slice(0, 10),
-                divPerShare: r.PER_SHARE_PRETAX_BONUS ?? 0,
+                divPerShare: (r.PRETAX_BONUS_RMB ?? 0) / 10,
                 exDivDate: (r.EX_DIVIDEND_DATE ?? '').slice(0, 10),
-                recordDate: (r.EQUITY_DATE ?? '').slice(0, 10),
+                recordDate: (r.EQUITY_RECORD_DATE ?? '').slice(0, 10),
+                planText: (r.IMPL_PLAN_PROFILE ?? '').trim(),
             }))
     } catch {
         return []
@@ -421,25 +447,55 @@ export async function fetchTopSectors(
     const base = 'https://push2.eastmoney.com/api/qt/clist/get'
     const qs = `pn=1&pz=${topN}&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14,f3`
 
-    let lastErr: unknown
-    for (let i = 0; i < 3; i++) {
-        try {
-            const resp = await axios.get(`${base}?${qs}`, {
-                timeout: 6000,
-                headers: { Referer: 'https://quote.eastmoney.com/' },
-            })
-            const list: Array<{ f12: string; f14: string; f3: number }> = resp.data?.data?.diff ?? []
+    // 东方财富优先，失败后 fallback 新浪
+    try {
+        const resp = await axios.get(`${base}?${qs}`, {
+            timeout: 6000,
+            headers: { Referer: 'https://quote.eastmoney.com/' },
+        })
+        const list: Array<{ f12: string; f14: string; f3: number }> = resp.data?.data?.diff ?? []
+        if (list.length > 0) {
             return list.map((item) => ({
                 code: item.f12,
                 name: item.f14,
                 changePercent: item.f3 / 100,
             }))
-        } catch (err) {
-            lastErr = err
-            if (i < 2) await new Promise((r) => setTimeout(r, 800 * (i + 1)))
         }
+    } catch {
+        // 东财挂了，降级新浪
     }
-    throw lastErr
+
+    // 新浪 fallback：vip.stock.finance.sina.com.cn/q/view/newSinaHy.php
+    try {
+        const sinaUrl = 'https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php'
+        const resp = await axios.get(sinaUrl, {
+            timeout: 8000,
+            responseType: 'arraybuffer',
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                Referer: 'https://finance.sina.com.cn/',
+            },
+        })
+        const iconv = await import('iconv-lite')
+        const text: string = iconv.decode(Buffer.from(resp.data), 'gbk')
+        const match = text.match(/var\s+S_Finance_bankuai_sinaindustry\s*=\s*(\{.*?\})\s*;?\s*$/m)
+        if (!match) return []
+        const raw: Record<string, string> = JSON.parse(match[1])
+        return Object.entries(raw)
+            .map(([key, val]) => {
+                const parts = val.split(',')
+                return {
+                    code: key,
+                    name: parts[1] ?? '',
+                    changePercent: parseFloat(parts[5]) || 0,
+                }
+            })
+            .sort((a, b) => b.changePercent - a.changePercent)
+            .slice(0, topN)
+    } catch {
+        return []
+    }
 }
 
 export async function searchStock(keyword: string): Promise<{ code: string; name: string }[]> {
@@ -484,28 +540,24 @@ export async function fetchSectorKLine(bkCode: string, days: number = 7): Promis
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         Referer: 'https://quote.eastmoney.com/',
     }
-    let lastErr: unknown
-    for (let i = 0; i < 3; i++) {
-        try {
-            const resp = await axios.get(url, { params, timeout: 8000, headers: emHeaders })
-            const klines: string[] = resp.data?.data?.klines ?? []
-            return klines.map((line) => {
-                const [date, open, close, high, low, volume] = line.split(',')
-                return {
-                    date,
-                    open: parseFloat(open),
-                    close: parseFloat(close),
-                    high: parseFloat(high),
-                    low: parseFloat(low),
-                    volume: parseFloat(volume),
-                }
-            })
-        } catch (err) {
-            lastErr = err
-            if (i < 2) await new Promise((r) => setTimeout(r, 500 * (i + 1)))
-        }
+    try {
+        const resp = await axios.get(url, { params, timeout: 8000, headers: emHeaders })
+        const klines: string[] = resp.data?.data?.klines ?? []
+        if (!klines || klines.length === 0) return []
+        return klines.map((line) => {
+            const [date, open, close, high, low, volume] = line.split(',')
+            return {
+                date,
+                open: parseFloat(open),
+                close: parseFloat(close),
+                high: parseFloat(high),
+                low: parseFloat(low),
+                volume: parseFloat(volume),
+            }
+        })
+    } catch {
+        return [] // 东财挂了，返回空数组而非抛错
     }
-    throw lastErr
 }
 /**
  * 拉取某板块内今日涨幅前 topN 的个股
@@ -515,31 +567,35 @@ export async function fetchSectorTopStocks(
     bkCode: string,
     topN: number = 5
 ): Promise<{ code: string; name: string; changePercent: number }[]> {
-    const listUrl = 'https://push2.eastmoney.com/api/qt/clist/get'
-    const listParams = {
-        pn: 1,
-        pz: topN,
-        po: 1,
-        np: 1,
-        ut: 'bd1d9ddb04089700cf9c27f6f7426281',
-        fltt: 2,
-        invt: 2,
-        fid: 'f3',
-        fs: `b:${bkCode}`,
-        fields: 'f12,f14,f3',
+    try {
+        const listUrl = 'https://push2.eastmoney.com/api/qt/clist/get'
+        const listParams = {
+            pn: 1,
+            pz: topN,
+            po: 1,
+            np: 1,
+            ut: 'bd1d9ddb04089700cf9c27f6f7426281',
+            fltt: 2,
+            invt: 2,
+            fid: 'f3',
+            fs: `b:${bkCode}`,
+            fields: 'f12,f14,f3',
+        }
+        const listResp = await axios.get(listUrl, {
+            params: listParams,
+            timeout: 6000,
+            headers: { Referer: 'https://quote.eastmoney.com/' },
+        })
+        const stocks: Array<{ f12: string; f14: string; f3: number }> =
+            listResp.data?.data?.diff ?? []
+        return stocks.map((s) => ({
+            code: s.f12,
+            name: s.f14,
+            changePercent: s.f3 / 100,
+        }))
+    } catch {
+        return [] // 东财挂了，返回空数组
     }
-    const listResp = await axios.get(listUrl, {
-        params: listParams,
-        timeout: 6000,
-        headers: { Referer: 'https://quote.eastmoney.com/' },
-    })
-    const stocks: Array<{ f12: string; f14: string; f3: number }> = listResp.data?.data?.diff ?? []
-
-    return stocks.map((s) => ({
-        code: s.f12,
-        name: s.f14,
-        changePercent: s.f3 / 100,
-    }))
 }
 
 // ─── 潜伏板块识别 ────────────────────────────────────────────────────────
@@ -694,4 +750,168 @@ export async function fetchDynamicCandidates(
         }
     }
     return candidates
+}
+
+// ─── 热门板块近7日趋势（成分股聚合走势） ────────────────────────────────
+// 背景：东财 push2his 板块K线接口已被反爬限制，新浪又无直接的板块历史K线接口
+// （getKLineData / ssl_qsfx_zjlrqs / hq.sinajs.cn 均不接受 new_blhy 板块代码）。
+// 方案：用新浪 Market_Center.getHQNodeData 取板块成交额前N成分股，
+//       再逐个取新浪个股日K，按「首日收盘价归一化为100」等权平均，合成板块相对走势。
+
+export interface SectorTrendItem {
+    code: string
+    name: string
+    changePercent: number // 今日涨跌幅
+    return7d: number // 7日累计涨幅（%）
+    klines: KLineData[] // 归一化聚合走势（首日 close=100）
+    leaderName: string // 成交额第一的成分股名称（代表股）
+}
+
+// 简单并发池：同时最多 limit 个 in-flight，防新浪反爬
+async function mapWithConcurrency<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = new Array(items.length)
+    let cursor = 0
+    async function worker(): Promise<void> {
+        while (cursor < items.length) {
+            const i = cursor++
+            results[i] = await fn(items[i], i)
+        }
+    }
+    const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker())
+    await Promise.all(workers)
+    return results
+}
+
+// 新浪板块成分股（按成交额降序取前N）
+export async function fetchSectorConstituents(
+    sectorCode: string,
+    topN: number = 3
+): Promise<Array<{ code: string; name: string; amount: number }>> {
+    const url =
+        'https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData'
+    const params = {
+        page: 1,
+        num: topN,
+        sort: 'amount',
+        asc: 0,
+        node: sectorCode,
+        _s_r_a: 'auto',
+    }
+    try {
+        const resp = await axios.get(url, {
+            params,
+            timeout: 8000,
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                Referer: 'https://vip.stock.finance.sina.com.cn/',
+            },
+        })
+        const list: Array<{ code: string; name: string; amount: number }> = resp.data ?? []
+        if (!Array.isArray(list)) return []
+        return list.map((s) => ({
+            code: s.code,
+            name: s.name,
+            amount: Number(s.amount) || 0,
+        }))
+    } catch {
+        return []
+    }
+}
+
+// 归一化聚合：多只成分股日K → 板块相对走势（首日 close=100）
+// 每只股按首个共有日收盘价归一，每日取各成分股归一值均值；volume 取成分股当日成交量合计
+function aggregateSectorTrend(stockKlines: KLineData[][]): KLineData[] {
+    const valid = stockKlines.filter((k) => Array.isArray(k) && k.length >= 2)
+    if (valid.length === 0) return []
+
+    // 取所有成分股共有日期的交集
+    const dateSets = valid.map((ks) => new Set(ks.map((k) => k.date)))
+    let commonDates = [...dateSets[0]]
+    for (let i = 1; i < dateSets.length; i++) {
+        commonDates = commonDates.filter((d) => dateSets[i].has(d))
+    }
+    commonDates.sort()
+    if (commonDates.length < 2) return []
+
+    const firstDate = commonDates[0]
+
+    return commonDates.map((date) => {
+        const rels: number[] = []
+        let totalVol = 0
+        for (const ks of valid) {
+            const firstBar = ks.find((k) => k.date === firstDate)
+            const bar = ks.find((k) => k.date === date)
+            if (firstBar && firstBar.close > 0 && bar) {
+                rels.push((bar.close / firstBar.close) * 100)
+                totalVol += bar.volume
+            }
+        }
+        const avg = rels.length > 0 ? rels.reduce((a, b) => a + b, 0) / rels.length : 100
+        return {
+            date,
+            open: Number(avg.toFixed(4)),
+            close: Number(avg.toFixed(4)),
+            high: Number(avg.toFixed(4)),
+            low: Number(avg.toFixed(4)),
+            volume: totalVol,
+        }
+    })
+}
+
+/**
+ * 热门板块近7日趋势
+ * 取板块列表 → 每板块取成交额前3成分股 → 聚合7日走势 → 按7日涨幅降序
+ */
+export async function fetchTopSectorTrends(
+    topN: number = 12,
+    days: number = 7
+): Promise<SectorTrendItem[]> {
+    const sectors = await fetchTopSectors(topN)
+    if (sectors.length === 0) return []
+
+    const results = await mapWithConcurrency(sectors, 6, async (sector) => {
+        try {
+            const constituents = await fetchSectorConstituents(sector.code, 3)
+            if (constituents.length === 0) return null
+
+            const stockKlines = await mapWithConcurrency(
+                constituents,
+                3,
+                async (c) => {
+                    try {
+                        return await fetchKLine(c.code, days)
+                    } catch {
+                        return [] as KLineData[]
+                    }
+                }
+            )
+
+            const klines = aggregateSectorTrend(stockKlines)
+            if (klines.length < 2) return null
+
+            const first = klines[0].close
+            const last = klines[klines.length - 1].close
+            const return7d = first > 0 ? ((last - first) / first) * 100 : 0
+
+            return {
+                code: sector.code,
+                name: sector.name,
+                changePercent: sector.changePercent,
+                return7d: Number(return7d.toFixed(2)),
+                klines,
+                leaderName: constituents[0]?.name ?? '',
+            }
+        } catch {
+            return null
+        }
+    })
+
+    return results
+        .filter((r): r is SectorTrendItem => r !== null)
+        .sort((a, b) => b.return7d - a.return7d)
 }

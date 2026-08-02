@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { KLineData, Holding, DividendRecord } from '../types'
+import type { KLineData, Holding, DividendRecord, StockFundamentals } from '../types'
 import KLineChart from '../components/KLineChart'
 import BuyAdvicePanel from '../components/BuyAdvicePanel'
 
@@ -11,6 +11,65 @@ type KLineMode = 'day' | 'week' | '5min' | '60min'
 const DAY_OPTIONS = [30, 60, 90, 180]
 const INTRADAY_BARS: Record<string, number> = { '5min': 78, '60min': 360 }
 const INTRADAY_SCALES: Record<string, number> = { '5min': 5, '60min': 60 }
+
+// 基本面卡片：估值/盈利/成长/规模/每股/质量，缺失字段显示「—」
+function fmtNum(v: number | null, d = 2, suffix = ''): string {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—'
+    return `${v.toFixed(d)}${suffix}`
+}
+function fmtPct(v: number | null, withSign = true): string {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—'
+    const sign = withSign && v > 0 ? '+' : ''
+    return `${sign}${v.toFixed(2)}%`
+}
+
+function FundamentalsCard({ f }: { f: StockFundamentals }) {
+    const peText = f.pe !== null
+        ? `${fmtNum(f.pe, 1)}${f.peEpsYear ? `（${f.peEpsYear}年报）` : ''}`
+        : '—'
+    const items: Array<{ label: string; value: string; tone?: 'up' | 'down' }> = [
+        { label: '市盈率 PE', value: peText },
+        { label: '市净率 PB', value: fmtNum(f.pb, 2) },
+        { label: 'ROE', value: fmtPct(f.roe, false) },
+        { label: '毛利率', value: fmtPct(f.grossMargin, false) },
+        { label: '净利率', value: fmtPct(f.netMargin, false) },
+        {
+            label: '营收同比',
+            value: fmtPct(f.revenueYoy),
+            tone: f.revenueYoy !== null && f.revenueYoy >= 0 ? 'up' : 'down',
+        },
+        {
+            label: '净利同比',
+            value: fmtPct(f.profitYoy),
+            tone: f.profitYoy !== null && f.profitYoy >= 0 ? 'up' : 'down',
+        },
+        { label: '营业收入', value: f.revenueYi !== null ? `${f.revenueYi.toFixed(2)} 亿` : '—' },
+        { label: '归母净利', value: f.netProfitYi !== null ? `${f.netProfitYi.toFixed(2)} 亿` : '—' },
+        { label: '每股收益', value: fmtNum(f.eps, 3, ' 元') },
+        { label: '每股净资产', value: fmtNum(f.bps, 2, ' 元') },
+        { label: '资产负债率', value: fmtPct(f.debtRatio, false) },
+    ]
+    return (
+        <div className="kline-ai-section fundamentals-card">
+            <h3>
+                基本面
+                {f.reportDate && (
+                    <span className="fundamentals-report">
+                        {f.reportType ? `${f.reportType} · ` : ''}{f.reportDate}
+                    </span>
+                )}
+            </h3>
+            <div className="fundamentals-grid">
+                {items.map((it) => (
+                    <div className="fundamentals-cell" key={it.label}>
+                        <div className="fundamentals-label">{it.label}</div>
+                        <div className={`fundamentals-value ${it.tone ?? ''}`}>{it.value}</div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    )
+}
 
 export default function StockDetail() {
     const { code } = useParams<{ code: string }>()
@@ -36,6 +95,7 @@ export default function StockDetail() {
     const [holding, setHolding] = useState<Holding | null>(null)
     const [sectorInfo, setSectorInfo] = useState<{ sector: string; subSector: string } | null>(null)
     const [dividends, setDividends] = useState<DividendRecord[]>([])
+    const [fundamentals, setFundamentals] = useState<StockFundamentals | null>(null)
     const quoteTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
     // 定时刷新实时股价（交易时间内每5秒）
@@ -89,6 +149,22 @@ export default function StockDetail() {
             if (results[1].status === 'fulfilled') setWeeklyContextKlines(results[1].value)
             if (results[2].status === 'fulfilled') setMonthlyContextKlines(results[2].value)
         })
+        return () => {
+            cancelled = true
+        }
+    }, [code])
+
+    // 每次换股：拉一次基本面（与K线周期切换解耦）
+    useEffect(() => {
+        if (!code) return
+        let cancelled = false
+        setFundamentals(null)
+        window.api.market
+            .getFundamentals(code)
+            .then((f) => {
+                if (!cancelled && f.reportDate !== null) setFundamentals(f)
+            })
+            .catch(() => {})
         return () => {
             cancelled = true
         }
@@ -371,6 +447,8 @@ export default function StockDetail() {
                     monthlyKlines={monthlyContextKlines}
                 />
             )}
+
+            {fundamentals && <FundamentalsCard f={fundamentals} />}
 
             {dividends.length > 0 && (
                 <div className="kline-ai-section">

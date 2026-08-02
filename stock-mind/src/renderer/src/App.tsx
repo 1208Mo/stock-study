@@ -7,6 +7,7 @@ import Settings from './pages/Settings'
 import DailyDecision from './pages/DailyDecision'
 import RealtimeChart from './pages/RealtimeChart'
 import AIChat from './pages/AIChat'
+import SectorRadar from './pages/SectorRadar'
 
 export default function App() {
     useEffect(() => {
@@ -48,6 +49,14 @@ export default function App() {
                             每日决策
                         </NavLink>
                         <NavLink
+                            to="/radar"
+                            className={({ isActive }) =>
+                                isActive ? 'nav-item active' : 'nav-item'
+                            }
+                        >
+                            板块雷达
+                        </NavLink>
+                        <NavLink
                             to="/chat"
                             className={({ isActive }) =>
                                 isActive ? 'nav-item active' : 'nav-item'
@@ -75,6 +84,7 @@ export default function App() {
                         <Route path="/realtime/:code" element={<RealtimeChart />} />
                         <Route path="/watchlist" element={<Watchlist />} />
                         <Route path="/decision" element={<DailyDecision />} />
+                        <Route path="/radar" element={<SectorRadar />} />
                         <Route path="/chat" element={<AIChat />} />
                         <Route path="/settings" element={<Settings />} />
                     </Routes>

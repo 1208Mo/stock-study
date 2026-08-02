@@ -4,6 +4,14 @@ import { registerAllIpcHandlers } from './ipc'
 import { initDatabase } from './db'
 import { startScheduler } from './services/scheduler'
 
+// 必须在 app.whenReady() 之前设置，否则 dev 模式下 Electron 会用 package.json 的 name
+// (stock-mind) 作为 userData，导致 Local Storage / Session Storage 等落到 stock-mind 目录，
+// 与 SQLite 数据库 (com.stockmind.app) 分裂。
+app.setName('com.stockmind.app')
+if (process.platform === 'win32') {
+    app.setAppUserModelId('com.stockmind.app')
+}
+
 let mainWindow: BrowserWindow | null = null
 let petWindow: BrowserWindow | null = null
 
@@ -159,12 +167,6 @@ ipcMain.handle('pet:resize', (_e, width: number, height: number) => {
 })
 
 app.whenReady().then(async () => {
-    // 统一设置 appId，确保开发模式和生产模式使用同一个数据库路径
-    app.setName('com.stockmind.app')
-    if (process.platform === 'win32') {
-        app.setAppUserModelId('com.stockmind.app')
-    }
-
     await initDatabase()
     registerAllIpcHandlers()
     startScheduler()

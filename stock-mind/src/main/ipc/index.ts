@@ -4,11 +4,13 @@ import {
     getAllHoldings,
     addHolding,
     updateHolding,
+    updateHoldingSector,
     deleteHolding,
     addTrade,
     getHoldingTrades,
     getAllWatchlist,
     addToWatchlist,
+    updateWatchlistSector,
     removeFromWatchlist,
     getAllWatchlistGroups,
     addWatchlistGroup,
@@ -23,6 +25,12 @@ import {
     formatInvestorProfileFull,
     saveAnalysis,
     getAnalysesForStock,
+    saveDecision,
+    getDecisions,
+    getDecisionById,
+    getPickReviewsByDecisionId,
+    getDecisionStats,
+    deleteDecision,
     listChatSessions,
     createChatSession,
     renameChatSession,
@@ -45,8 +53,12 @@ import {
     fetchSectorInfo,
     fetchSectorKLine,
     fetchDividends,
+    fetchSectorTopStocks,
+    fetchTopSectorTrends,
     searchStock,
 } from '../services/market'
+import { fetchCapitalFlowDaily, fetchMarketFlowSnapshot, fetchDailyKLine, fetchSectorCapitalFlow } from '../services/capitalFlow'
+import { fetchFundamentals } from '../services/fundamentals'
 import {
     callAI,
     buildStockAnalysisPrompt,
@@ -57,7 +69,8 @@ import {
     AIProvider,
 } from '../services/ai'
 import { runDecisionAgent } from '../services/agent'
-import { runResearchAgent, getSessionMessagesFromCheckpoint } from '../services/researchAgent'
+import { runResearchAgent, getSessionMessagesFromCheckpoint, modelSupportsVision, analyzeImagesWithVision, type ImageContent } from '../services/researchAgent'
+import { reviewDecision, runPendingDecisionReviews } from '../services/decisionReview'
 
 function getConfiguredAI() {
     const provider = (getSetting('ai_provider') ?? 'deepseek') as AIProvider
@@ -76,14 +89,29 @@ export function registerAllIpcHandlers(): void {
 
     ipcMain.handle(
         'holdings:add',
-        (_e, code: string, name: string, costPrice: number, quantity: number) => {
-            return addHolding(code, name, costPrice, quantity)
+        (
+            _e,
+            code: string,
+            name: string,
+            costPrice: number,
+            quantity: number,
+            sector?: string,
+            subSector?: string
+        ) => {
+            return addHolding(code, name, costPrice, quantity, sector, subSector)
         }
     )
 
     ipcMain.handle('holdings:update', (_e, id: number, costPrice: number, quantity: number) => {
         return updateHolding(id, costPrice, quantity)
     })
+
+    ipcMain.handle(
+        'holdings:updateSector',
+        (_e, id: number, sector: string, subSector: string) => {
+            return updateHoldingSector(id, sector, subSector)
+        }
+    )
 
     ipcMain.handle('holdings:delete', (_e, id: number) => deleteHolding(id))
 
@@ -99,9 +127,26 @@ export function registerAllIpcHandlers(): void {
     // --- Watchlist ---
     ipcMain.handle('watchlist:getAll', () => getAllWatchlist())
 
-    ipcMain.handle('watchlist:add', (_e, code: string, name: string, note?: string) => {
-        return addToWatchlist(code, name, note)
-    })
+    ipcMain.handle(
+        'watchlist:add',
+        (
+            _e,
+            code: string,
+            name: string,
+            note?: string,
+            sector?: string,
+            subSector?: string
+        ) => {
+            return addToWatchlist(code, name, note, sector, subSector)
+        }
+    )
+
+    ipcMain.handle(
+        'watchlist:updateSector',
+        (_e, id: number, sector: string, subSector: string) => {
+            return updateWatchlistSector(id, sector, subSector)
+        }
+    )
 
     ipcMain.handle('watchlist:remove', (_e, id: number) => removeFromWatchlist(id))
 
@@ -153,6 +198,10 @@ export function registerAllIpcHandlers(): void {
 
     ipcMain.handle('market:getTopSectors', (_e, topN?: number) => fetchTopSectors(topN ?? 10))
 
+    ipcMain.handle('market:getTopSectorTrends', (_e, topN?: number, days?: number) =>
+        fetchTopSectorTrends(topN ?? 12, days ?? 7)
+    )
+
     ipcMain.handle(
         'market:getDynamicCandidates',
         (_e, topSectorCount?: number, perSector?: number) =>
@@ -161,6 +210,32 @@ export function registerAllIpcHandlers(): void {
 
     ipcMain.handle('market:getAmbushSectors', (_e, limit?: number) =>
         fetchAmbushSectors(limit ?? 8)
+    )
+
+    ipcMain.handle(
+        'market:getCapitalFlowDaily',
+        (_e, code: string, days?: number, market?: 'sh' | 'sz') =>
+            fetchCapitalFlowDaily(code, days ?? 30, market)
+    )
+
+    ipcMain.handle(
+        'market:getDailyKLine',
+        (_e, code: string, days?: number, market?: 'sh' | 'sz') =>
+            fetchDailyKLine(code, days ?? 30, market)
+    )
+
+    ipcMain.handle('market:getSectorCapitalFlow', (_e, topN?: number) =>
+        fetchSectorCapitalFlow(topN ?? 15)
+    )
+
+    ipcMain.handle('market:getMarketFlowSnapshot', () => fetchMarketFlowSnapshot())
+
+    ipcMain.handle('market:getSectorTopStocks', (_e, bkCode: string, topN?: number) =>
+        fetchSectorTopStocks(bkCode, topN ?? 8)
+    )
+
+    ipcMain.handle('market:getFundamentals', (_e, code: string) =>
+        fetchFundamentals(code)
     )
 
     ipcMain.handle(
@@ -355,7 +430,7 @@ export function registerAllIpcHandlers(): void {
         ) => {
             const { provider, apiKey, baseUrl, model } = getConfiguredAI()
             const profile = getInvestorProfile()
-            return runDecisionAgent({
+            const output = await runDecisionAgent({
                 provider,
                 apiKey,
                 baseUrl,
@@ -366,8 +441,42 @@ export function registerAllIpcHandlers(): void {
                 riskLevel: payload.riskLevel,
                 userProfile: formatInvestorProfileFull(profile),
             })
+            const savedDecisionId = saveDecision({
+                decisionDate: payload.date,
+                marketContext: output.marketContext,
+                decisionText: output.decision,
+                structuredDecision: output.structuredDecision,
+                diagnostics: output.diagnostics,
+                capital: payload.capital,
+                riskLevel: payload.riskLevel,
+                marketRegime: output.marketRegime,
+            })
+            return { ...output, savedDecisionId }
         }
     )
+
+    // --- 决策记忆 + 命中追踪 ---
+    ipcMain.handle('decision:list', (_e, limit?: number) => {
+        const list = getDecisions(limit ?? 30)
+        return list.map((d) => ({ ...d, picks: getPickReviewsByDecisionId(d.id) }))
+    })
+
+    ipcMain.handle('decision:getById', (_e, id: number) => {
+        const d = getDecisionById(id)
+        return d ? { ...d, picks: getPickReviewsByDecisionId(id) } : null
+    })
+
+    ipcMain.handle('decision:stats', (_e, days?: number) => getDecisionStats(days ?? 30))
+
+    ipcMain.handle('decision:review', async (_e, decisionId?: number) => {
+        if (decisionId != null) return reviewDecision(decisionId)
+        return runPendingDecisionReviews()
+    })
+
+    ipcMain.handle('decision:delete', (_e, id: number) => {
+        deleteDecision(id)
+        return true
+    })
 
     // --- AI Chat 会话管理 ---
     ipcMain.handle('chat:listSessions', () => listChatSessions())
@@ -409,10 +518,11 @@ export function registerAllIpcHandlers(): void {
                 sessionId: string
                 input: string
                 requestId: string
+                images?: ImageContent[]
             }
         ) => {
             const sender = event.sender
-            const { requestId, sessionId, input } = payload
+            const { requestId, sessionId, input, images } = payload
             const controller = new AbortController()
             activeAborts.set(requestId, controller)
 
@@ -420,7 +530,7 @@ export function registerAllIpcHandlers(): void {
 
             try {
                 const { provider, apiKey, baseUrl, model } = getConfiguredAI()
-                if (!input?.trim()) {
+                if (!input?.trim() && (!images || images.length === 0)) {
                     sender.send('ai:chat:error', { requestId, error: '输入不能为空' })
                     return
                 }
@@ -429,18 +539,48 @@ export function registerAllIpcHandlers(): void {
                     return
                 }
 
+                // 自动降级：当模型不支持视觉时，用视觉模型分析图片转为文字描述
+                let processedInput = input
+                let visionAnalysis = ''
+                if (images && images.length > 0) {
+                    const effectiveModel = model || ''
+                    if (!modelSupportsVision(effectiveModel)) {
+                        // 通知前端正在分析图片
+                        if (!sender.isDestroyed()) {
+                            sender.send('ai:chat:analyzing', { requestId, message: '正在分析图片...' })
+                        }
+                        try {
+                            visionAnalysis = await analyzeImagesWithVision(
+                                provider,
+                                apiKey,
+                                baseUrl,
+                                images,
+                                controller.signal
+                            )
+                            // 将图片描述作为上下文追加到用户输入
+                            processedInput = `${input}\n\n【图片分析】用户上传了${images.length}张图片，分析结果如下：\n${visionAnalysis}`
+                        } catch (visionErr) {
+                            // 视觉降级失败，继续尝试直接发送
+                            console.warn('视觉降级分析失败，将尝试直接发送:', visionErr)
+                            processedInput = `${input}\n\n【用户上传了${images.length}张图片】`
+                        }
+                    }
+                }
+
                 // 先把用户消息落到 chat_messages（展示表）
-                appendChatMessage(sessionId, 'user', input)
+                appendChatMessage(sessionId, 'user', input, undefined, images)
 
                 // 如果这是首条 user 消息，用它前 20 字自动生成 title
                 const existing = listChatMessages(sessionId)
                 if (existing.length === 1) {
-                    const auto = input.trim().replace(/\s+/g, ' ').slice(0, 20)
+                    const auto = input.trim().replace(/\s+/g, ' ').slice(0, 20) || '图片对话'
                     if (auto) renameChatSession(sessionId, auto)
                 }
                 touchChatSession(sessionId)
 
                 const profile = getInvestorProfile()
+                // 如果已做视觉降级，用处理后的文本；否则用原始输入+图片
+                const hasVisionFallback = visionAnalysis !== ''
                 const result = await runResearchAgent(
                     {
                         provider,
@@ -448,7 +588,8 @@ export function registerAllIpcHandlers(): void {
                         baseUrl,
                         model,
                         sessionId,
-                        input,
+                        input: processedInput,
+                        images: hasVisionFallback ? undefined : images,
                         userProfile: formatInvestorProfile(profile),
                         abortSignal: controller.signal,
                     },

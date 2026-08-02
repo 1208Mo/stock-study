@@ -13,8 +13,9 @@ interface HoldingsState {
     error: string | null
     fetchHoldings: () => Promise<void>
     refreshQuotes: () => Promise<void>
-    addHolding: (code: string, name: string, costPrice: number, quantity: number) => Promise<void>
+    addHolding: (code: string, name: string, costPrice: number, quantity: number, sector?: string, subSector?: string) => Promise<void>
     updateHolding: (id: number, costPrice: number, quantity: number) => Promise<void>
+    updateSector: (id: number, sector: string, subSector: string) => Promise<void>
     deleteHolding: (id: number) => Promise<void>
     addTrade: (holdingId: number, tradeType: 'buy' | 'sell', costPrice: number, quantity: number, note?: string) => Promise<void>
 }
@@ -57,13 +58,18 @@ export const useHoldingsStore = create<HoldingsState>((set, get) => ({
         }
     },
 
-    addHolding: async (code, name, costPrice, quantity) => {
-        await window.api.holdings.add(code, name, costPrice, quantity)
+    addHolding: async (code, name, costPrice, quantity, sector, subSector) => {
+        await window.api.holdings.add(code, name, costPrice, quantity, sector, subSector)
         await get().fetchHoldings()
     },
 
     updateHolding: async (id, costPrice, quantity) => {
         await window.api.holdings.update(id, costPrice, quantity)
+        await get().fetchHoldings()
+    },
+
+    updateSector: async (id, sector, subSector) => {
+        await window.api.holdings.updateSector(id, sector, subSector)
         await get().fetchHoldings()
     },
 

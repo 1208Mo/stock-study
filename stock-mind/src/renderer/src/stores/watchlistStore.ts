@@ -9,7 +9,8 @@ interface WatchlistState {
     loading: boolean
     fetchWatchlist: () => Promise<void>
     refreshWatchlistQuotes: () => Promise<void>
-    addItem: (code: string, name: string, note?: string) => Promise<void>
+    addItem: (code: string, name: string, note?: string, sector?: string, subSector?: string) => Promise<void>
+    updateSector: (id: number, sector: string, subSector: string) => Promise<void>
     removeItem: (id: number) => Promise<void>
     search: (keyword: string) => Promise<{ code: string; name: string }[]>
     addGroup: (name: string) => Promise<void>
@@ -54,9 +55,15 @@ export const useWatchlistStore = create<WatchlistState>((set, get) => ({
         }
     },
 
-    addItem: async (code, name, note) => {
-        await window.api.watchlist.add(code, name, note)
+    addItem: async (code, name, note, sector, subSector) => {
+        await window.api.watchlist.add(code, name, note, sector, subSector)
         await get().fetchWatchlist()
+    },
+
+    updateSector: async (id, sector, subSector) => {
+        await window.api.watchlist.updateSector(id, sector, subSector)
+        const items = await window.api.watchlist.getAll()
+        set({ items })
     },
 
     removeItem: async (id) => {
