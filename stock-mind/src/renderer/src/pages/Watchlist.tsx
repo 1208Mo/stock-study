@@ -80,6 +80,7 @@ export default function Watchlist() {
         fetchWatchlist()
         // 每5秒刷新一次行情
         const timer = setInterval(() => {
+            if (document.visibilityState !== 'visible') return
             useWatchlistStore.getState().refreshWatchlistQuotes()
         }, 5000)
         return () => clearInterval(timer)

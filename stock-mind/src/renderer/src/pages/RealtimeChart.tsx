@@ -72,7 +72,7 @@ export default function RealtimeChart() {
     }, [code])
 
     async function fetchQuote() {
-        if (!code) return
+        if (!code || document.visibilityState !== 'visible') return
         try {
             const q = await window.api.market.getQuote(code)
             setQuote(q)

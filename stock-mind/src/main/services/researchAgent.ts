@@ -17,17 +17,19 @@ import {
     HumanMessage,
     SystemMessage,
     AIMessage,
+    RemoveMessage,
     ToolMessage,
     isAIMessage,
     isHumanMessage,
     isToolMessage,
 } from '@langchain/core/messages'
 import type { BaseMessage } from '@langchain/core/messages'
+import { REMOVE_ALL_MESSAGES } from '@langchain/langgraph'
 import { createReactAgent } from '@langchain/langgraph/prebuilt'
 import type { AIProvider } from './ai'
 import { fetchQuote, fetchKLine, fetchSectorInfo, fetchDividends, searchStock, fetchBatchQuotes } from './market'
 import { fetchFundamentals } from './fundamentals'
-import { getAllHoldings } from '../db'
+import { getAllHoldings, listChatMessages } from '../db'
 import { getChatCheckpointer } from './chatCheckpointer'
 
 const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> = {
@@ -533,6 +535,67 @@ const SYSTEM_PROMPT = `你是A股研究助手，服务对象是正在学习投�
 - 涉及用户持仓的建议（止盈/止损/调仓/加仓）时，必须基于 get_my_holdings 返回的实时盈亏与仓位占比，明确给出参考条件而非买卖指令，同时提示行业集中度风险。
 - 每次具体标的分析最后给一句"新手注意"。`
 
+const MAX_HISTORY_TURNS = 8
+const MAX_HISTORY_CHARS = 32_000
+const MAX_HISTORY_MESSAGE_CHARS = 12_000
+
+/**
+ * Tool messages often contain full quote/K-line payloads. They are useful while a turn runs,
+ * but retaining them forever makes the next request exceed the model context after a few turns.
+ * Keep only completed user/final-answer pairs and bound the resulting conversational history.
+ */
+function compactConversationHistory(messages: BaseMessage[]): Array<HumanMessage | AIMessage> {
+    const visible: Array<HumanMessage | AIMessage> = []
+    for (const message of messages) {
+        const rawText = contentToText(message.content).trim()
+        const text = rawText.length > MAX_HISTORY_MESSAGE_CHARS
+            ? `${rawText.slice(0, MAX_HISTORY_MESSAGE_CHARS)}\n[历史消息已截断]`
+            : rawText
+        if (!text) continue
+        const previous = visible[visible.length - 1]
+        if (isHumanMessage(message)) {
+            if (previous && isHumanMessage(previous)) {
+                visible[visible.length - 1] = new HumanMessage(`${previous.content}\n${text}`)
+            } else {
+                visible.push(new HumanMessage(text))
+            }
+        } else if (isAIMessage(message) && !isToolMessage(message)) {
+            if (previous && isAIMessage(previous)) {
+                visible[visible.length - 1] = new AIMessage(`${previous.content}\n${text}`)
+            } else {
+                visible.push(new AIMessage(text))
+            }
+        }
+    }
+
+    // A failed/aborted graph can leave an unanswered HumanMessage in the checkpoint.
+    while (visible.length > 0 && isHumanMessage(visible[visible.length - 1])) {
+        visible.pop()
+    }
+
+    const selected: Array<HumanMessage | AIMessage> = []
+    let chars = 0
+    let turns = 0
+    for (let i = visible.length - 1; i >= 0; i--) {
+        const message = visible[i]
+        const text = contentToText(message.content)
+        if (selected.length > 0 && chars + text.length > MAX_HISTORY_CHARS && turns > 0) break
+
+        selected.push(message)
+        chars += text.length
+        if (isHumanMessage(message)) {
+            turns++
+            if (turns >= MAX_HISTORY_TURNS) break
+        }
+    }
+
+    selected.reverse()
+    while (selected.length > 0 && !isHumanMessage(selected[0])) {
+        selected.shift()
+    }
+    return selected
+}
+
 export async function runResearchAgent(
     params: ResearchAgentInput,
     onChunk?: (chunk: string) => void
@@ -558,6 +621,38 @@ export async function runResearchAgent(
         version: 'v2' as const,
         // 单轮最多允许的 LangGraph 节点执行次数（防止工具死循环）
         recursionLimit: 25,
+    }
+
+    const checkpoint = await checkpointer.getTuple(config)
+    const checkpointMessages =
+        (checkpoint?.checkpoint.channel_values as { messages?: BaseMessage[] } | undefined)
+            ?.messages ?? []
+
+    // The UI message table contains only stable user/final-assistant messages. Prefer it
+    // over the Agent checkpoint, which also contains provider-specific tool-call chunks.
+    const persistedRows = listChatMessages(params.sessionId)
+    const lastPersisted = persistedRows[persistedRows.length - 1]
+    const rowsBeforeCurrentInput =
+        lastPersisted?.role === 'user'
+            ? persistedRows.slice(0, -1)
+            : persistedRows
+    const persistedHistory: Array<HumanMessage | AIMessage> = rowsBeforeCurrentInput.flatMap(
+        (row): Array<HumanMessage | AIMessage> => {
+            if (row.role === 'user' && row.content.trim()) return [new HumanMessage(row.content)]
+            if (row.role === 'assistant' && row.content.trim()) return [new AIMessage(row.content)]
+            return []
+        }
+    )
+    const history = compactConversationHistory(
+        persistedHistory.length > 0 ? persistedHistory : checkpointMessages
+    )
+
+    if (checkpointMessages.length > 0 || persistedHistory.length > 0) {
+        // Clean up snapshots produced by older app versions before writing the compact state.
+        checkpointer.compactThread(params.sessionId)
+        await agent.updateState(config, {
+            messages: [new RemoveMessage({ id: REMOVE_ALL_MESSAGES }), ...history],
+        })
     }
 
     const toolCalls: ResearchToolTrace[] = []
@@ -627,6 +722,12 @@ export async function runResearchAgent(
             (e instanceof Error && (e.name === 'AbortError' || /abort/i.test(e.message)))
         if (!isAbort) throw e
         aborted = true
+    } finally {
+        try {
+            checkpointer.compactThread(params.sessionId)
+        } catch (error) {
+            console.warn('Failed to compact chat checkpoint:', error)
+        }
     }
 
     return {

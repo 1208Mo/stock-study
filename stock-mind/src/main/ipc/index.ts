@@ -38,6 +38,7 @@ import {
     deleteChatSession,
     listChatMessages,
     appendChatMessage,
+    deleteChatMessage,
 } from '../db'
 import {
     fetchQuote,
@@ -81,6 +82,17 @@ function getConfiguredAI() {
     const baseUrl = getSetting(`ai_base_url_${provider}`)?.trim() || undefined
     const model = getSetting(`ai_model_${provider}`)?.trim() || undefined
     return { provider, apiKey, baseUrl, model }
+}
+
+function formatChatError(error: unknown): string {
+    const raw = error instanceof Error ? error.message : String(error)
+    if (/角色信息不能为空|role.*(?:empty|required)|(?:empty|required).*role/i.test(raw)) {
+        return '当前对话历史格式异常，已自动整理，请点击“重试”继续对话'
+    }
+    if (/stream disconnected|error sending request|ECONNRESET|ECONNREFUSED|ETIMEDOUT/i.test(raw)) {
+        return 'AI 服务连接中断。请检查 API Base URL/代理是否可用，然后点击“重试”。'
+    }
+    return raw
 }
 
 export function registerAllIpcHandlers(): void {
@@ -525,6 +537,8 @@ export function registerAllIpcHandlers(): void {
             const { requestId, sessionId, input, images } = payload
             const controller = new AbortController()
             activeAborts.set(requestId, controller)
+            let userMessageId: number | null = null
+            let assistantMessageId: number | null = null
 
             const cleanupAbort = () => activeAborts.delete(requestId)
 
@@ -568,7 +582,7 @@ export function registerAllIpcHandlers(): void {
                 }
 
                 // 先把用户消息落到 chat_messages（展示表）
-                appendChatMessage(sessionId, 'user', input, undefined, images)
+                userMessageId = appendChatMessage(sessionId, 'user', input, undefined, images)
 
                 // 如果这是首条 user 消息，用它前 20 字自动生成 title
                 const existing = listChatMessages(sessionId)
@@ -602,7 +616,12 @@ export function registerAllIpcHandlers(): void {
 
                 // 落库助手回复（含被 stop 时保留的部分内容）
                 if (result.content.trim()) {
-                    appendChatMessage(sessionId, 'assistant', result.content, result.toolCalls)
+                    assistantMessageId = appendChatMessage(
+                        sessionId,
+                        'assistant',
+                        result.content,
+                        result.toolCalls
+                    )
                 }
                 touchChatSession(sessionId)
 
@@ -624,11 +643,19 @@ export function registerAllIpcHandlers(): void {
                             aborted: true,
                         })
                     }
-                } else if (!event.sender.isDestroyed()) {
-                    event.sender.send('ai:chat:error', {
-                        requestId,
-                        error: e instanceof Error ? e.message : String(e),
-                    })
+                } else {
+                    if (assistantMessageId !== null) {
+                        deleteChatMessage(assistantMessageId)
+                    }
+                    if (userMessageId !== null) {
+                        deleteChatMessage(userMessageId)
+                    }
+                    if (!event.sender.isDestroyed()) {
+                        event.sender.send('ai:chat:error', {
+                            requestId,
+                            error: formatChatError(e),
+                        })
+                    }
                 }
             } finally {
                 cleanupAbort()

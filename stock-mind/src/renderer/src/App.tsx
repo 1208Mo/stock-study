@@ -1,13 +1,14 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
-import Portfolio from './pages/Portfolio'
-import StockDetail from './pages/StockDetail'
-import Watchlist from './pages/Watchlist'
-import Settings from './pages/Settings'
-import DailyDecision from './pages/DailyDecision'
-import RealtimeChart from './pages/RealtimeChart'
-import AIChat from './pages/AIChat'
-import SectorRadar from './pages/SectorRadar'
+
+const Portfolio = lazy(() => import('./pages/Portfolio'))
+const StockDetail = lazy(() => import('./pages/StockDetail'))
+const Watchlist = lazy(() => import('./pages/Watchlist'))
+const Settings = lazy(() => import('./pages/Settings'))
+const DailyDecision = lazy(() => import('./pages/DailyDecision'))
+const RealtimeChart = lazy(() => import('./pages/RealtimeChart'))
+const AIChat = lazy(() => import('./pages/AIChat'))
+const SectorRadar = lazy(() => import('./pages/SectorRadar'))
 
 export default function App() {
     useEffect(() => {
@@ -78,16 +79,18 @@ export default function App() {
                     </div>
                 </aside>
                 <main className="main-content">
-                    <Routes>
-                        <Route path="/" element={<Portfolio />} />
-                        <Route path="/stock/:code" element={<StockDetail />} />
-                        <Route path="/realtime/:code" element={<RealtimeChart />} />
-                        <Route path="/watchlist" element={<Watchlist />} />
-                        <Route path="/decision" element={<DailyDecision />} />
-                        <Route path="/radar" element={<SectorRadar />} />
-                        <Route path="/chat" element={<AIChat />} />
-                        <Route path="/settings" element={<Settings />} />
-                    </Routes>
+                    <Suspense fallback={<div className="loading-state">加载中...</div>}>
+                        <Routes>
+                            <Route path="/" element={<Portfolio />} />
+                            <Route path="/stock/:code" element={<StockDetail />} />
+                            <Route path="/realtime/:code" element={<RealtimeChart />} />
+                            <Route path="/watchlist" element={<Watchlist />} />
+                            <Route path="/decision" element={<DailyDecision />} />
+                            <Route path="/radar" element={<SectorRadar />} />
+                            <Route path="/chat" element={<AIChat />} />
+                            <Route path="/settings" element={<Settings />} />
+                        </Routes>
+                    </Suspense>
                 </main>
             </div>
         </HashRouter>

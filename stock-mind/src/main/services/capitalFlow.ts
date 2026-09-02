@@ -18,6 +18,7 @@ export interface CapitalFlowDaily {
 export interface MarketFlowSnapshot {
     name: string // '上证指数'
     code: string // '000001'
+    price: number // 最新指数点位
     changePercent: number // 涨跌幅（%）
     mainNet: number // 主力净流入（元）（新浪指数行情接口无此字段，恒为0）
     superLargeNet: number
@@ -227,24 +228,26 @@ export async function fetchMarketFlowSnapshot(): Promise<MarketFlowSnapshot[]> {
         const text: string = iconv.decode(Buffer.from(resp.data), 'gbk')
 
         const results: MarketFlowSnapshot[] = []
-        const lines = text.trim().split('\n')
+        const lines = text.trim().split(/\r?\n/)
         for (const line of lines) {
-            const match = line.match(/="([^"]+)"/)
+            // 从变量名提取指数代码；仅匹配行情变量，避免把响应中的其他引号内容当成行情。
+            const match = line.match(/hq_str_(?:sh|sz)(\d+)\s*=\s*"([^"]*)"/)
             if (!match) continue
-            const parts = match[1].split(',')
+            const rawCode = match[1]
+            const parts = match[2].split(',')
             if (parts.length < 10) continue
             const name = parts[0]
             const price = parseFloat(parts[3])
             const prevClose = parseFloat(parts[2])
+            if (!name || !Number.isFinite(price) || !Number.isFinite(prevClose) || prevClose <= 0) {
+                continue
+            }
             const changePercent =
-                prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0
+                ((price - prevClose) / prevClose) * 100
             results.push({
                 name,
-                code: match[0].includes('sh000001')
-                    ? '000001'
-                    : match[0].includes('sz399001')
-                      ? '399001'
-                      : '399006',
+                code: rawCode,
+                price,
                 changePercent: parseFloat(changePercent.toFixed(2)),
                 mainNet: 0,
                 superLargeNet: 0,

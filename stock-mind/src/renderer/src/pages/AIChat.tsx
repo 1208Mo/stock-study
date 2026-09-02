@@ -166,6 +166,7 @@ export default function AIChat() {
     const textareaMinHeight = 44
     const textareaMaxHeight = 160
     const activeRequestIdRef = useRef<string | null>(null)
+    const failedRequestRef = useRef<{ content: string; images?: ImageContent[] } | null>(null)
     const isNearBottomRef = useRef(true)
     const dragCounterRef = useRef(0)
 
@@ -220,6 +221,7 @@ export default function AIChat() {
             if ((!content.trim() && (!images || images.length === 0)) || !sessionId || sending) return
             setError('')
             setAnalyzingMessage(null)
+            failedRequestRef.current = null
 
             const trimmed = content.trim()
             appendMessage(sessionId, { role: 'user', content: trimmed, images })
@@ -270,6 +272,7 @@ export default function AIChat() {
                 cleanup()
                 setSending(false)
                 setError(errMsg)
+                failedRequestRef.current = { content: trimmed, images }
                 // 回退：去掉本轮 user + pending assistant
                 const cur =
                     useChatSessionsStore.getState().messagesBySession[sessionId] ?? []
@@ -466,12 +469,8 @@ export default function AIChat() {
     }
 
     function handleRetry() {
-        const list = useChatSessionsStore.getState().messagesBySession[activeSessionId ?? ''] ?? []
-        const last = list[list.length - 1]
-        if (last && last.role === 'user') {
-            // 出错时我们已经回退掉了 user，这个分支实际上走不到
-            doSend(last.content)
-        }
+        const failed = failedRequestRef.current
+        if (failed) doSend(failed.content, failed.images)
     }
 
     return (

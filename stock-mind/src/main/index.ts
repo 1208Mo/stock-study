@@ -14,9 +14,12 @@ if (process.platform === 'win32') {
 
 let mainWindow: BrowserWindow | null = null
 let petWindow: BrowserWindow | null = null
+let petEnabled = true
 
 function createWindow(): void {
-    mainWindow = new BrowserWindow({
+    if (mainWindow && !mainWindow.isDestroyed()) return
+
+    const window = new BrowserWindow({
         width: 1280,
         height: 800,
         minWidth: 960,
@@ -26,27 +29,52 @@ function createWindow(): void {
         webPreferences: {
             preload: join(__dirname, '../preload/index.js'),
             sandbox: false,
+            backgroundThrottling: true,
         },
     })
+    mainWindow = window
 
-    mainWindow.on('ready-to-show', () => {
-        mainWindow?.show()
+    window.on('ready-to-show', () => {
+        window.show()
     })
 
-    mainWindow.webContents.setWindowOpenHandler((details) => {
+    window.on('closed', () => {
+        if (mainWindow === window) mainWindow = null
+    })
+
+    window.webContents.setWindowOpenHandler((details) => {
         shell.openExternal(details.url)
         return { action: 'deny' }
     })
 
     if (process.env['ELECTRON_RENDERER_URL']) {
-        mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+        window.loadURL(process.env['ELECTRON_RENDERER_URL'])
     } else {
-        mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+        window.loadFile(join(__dirname, '../renderer/index.html'))
+    }
+}
+
+function showMainWindow(route?: string): void {
+    createWindow()
+    const window = mainWindow
+    if (!window) return
+
+    const show = () => {
+        window.show()
+        window.focus()
+        if (route) window.webContents.send('navigate-to', route)
+    }
+    if (window.webContents.isLoading()) {
+        window.webContents.once('did-finish-load', show)
+    } else {
+        show()
     }
 }
 
 function createPetWindow(): void {
-    petWindow = new BrowserWindow({
+    if (!petEnabled || (petWindow && !petWindow.isDestroyed())) return
+
+    const window = new BrowserWindow({
         width: 160,
         height: 200,
         transparent: true,
@@ -59,50 +87,44 @@ function createPetWindow(): void {
         webPreferences: {
             preload: join(__dirname, '../preload/index.js'),
             sandbox: false,
+            backgroundThrottling: true,
         },
     })
+    petWindow = window
 
-    petWindow.on('ready-to-show', () => {
-        petWindow?.show()
+    window.on('ready-to-show', () => {
+        if (petEnabled) window.show()
+    })
+
+    window.on('closed', () => {
+        if (petWindow === window) petWindow = null
     })
 
     // 隐藏菜单栏
-    petWindow.setMenu(null)
+    window.setMenu(null)
 
     // 设置初始位置（屏幕右下角）
     const { screen } = require('electron')
     const primaryDisplay = screen.getPrimaryDisplay()
     const { width, height } = primaryDisplay.workAreaSize
-    petWindow.setPosition(width - 200, height - 240)
+    window.setPosition(width - 200, height - 240)
 
     // 加载桌宠页面
     if (process.env['ELECTRON_RENDERER_URL']) {
-        petWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/pet.html`)
+        window.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/pet.html`)
     } else {
-        petWindow.loadFile(join(__dirname, '../renderer/pet.html'))
+        window.loadFile(join(__dirname, '../renderer/pet.html'))
     }
 
     // 右键菜单
     const petMenu = Menu.buildFromTemplate([
         {
             label: '打开主窗口',
-            click: () => {
-                if (mainWindow) {
-                    mainWindow.show()
-                    mainWindow.focus()
-                }
-            },
+            click: () => showMainWindow(),
         },
         {
             label: 'AI 对话',
-            click: () => {
-                if (mainWindow) {
-                    mainWindow.show()
-                    mainWindow.focus()
-                    // 通知渲染进程跳转到 AI 对话页面
-                    mainWindow.webContents.send('navigate-to', '/chat')
-                }
-            },
+            click: () => showMainWindow('/chat'),
         },
         {
             type: 'separator',
@@ -110,7 +132,8 @@ function createPetWindow(): void {
         {
             label: '隐藏桌宠',
             click: () => {
-                petWindow?.hide()
+                petEnabled = false
+                petWindow?.destroy()
             },
         },
         {
@@ -121,19 +144,22 @@ function createPetWindow(): void {
         },
     ])
 
-    petWindow.webContents.on('context-menu', (_, params) => {
-        petMenu.popup({ window: petWindow!, x: params.x, y: params.y })
+    window.webContents.on('context-menu', (_, params) => {
+        petMenu.popup({ window, x: params.x, y: params.y })
     })
 }
 
 // IPC: 显示/隐藏桌宠
 ipcMain.handle('pet:show', () => {
+    petEnabled = true
+    createPetWindow()
     petWindow?.show()
     return true
 })
 
 ipcMain.handle('pet:hide', () => {
-    petWindow?.hide()
+    petEnabled = false
+    petWindow?.destroy()
     return true
 })
 
@@ -171,14 +197,11 @@ app.whenReady().then(async () => {
     registerAllIpcHandlers()
     startScheduler()
     createWindow()
-    // 桌宠暂时屏蔽（等待替换透明素材后再打开）
-    // createPetWindow()
+    createPetWindow()
 
     app.on('activate', function () {
-        if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow()
-            // createPetWindow()
-        }
+        showMainWindow()
+        if (petEnabled) createPetWindow()
     })
 })
 

@@ -1,15 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 
-import standImg from '../assets/pet/stand.png'
-import standBagImg from '../assets/pet/stand-bag.png'
-import walkImg from '../assets/pet/walk.png'
-import sideImg from '../assets/pet/side.png'
-import happyImg from '../assets/pet/happy.png'
-import greetImg from '../assets/pet/greet.png'
-import talkImg from '../assets/pet/talk.png'
-
-// 待机时循环切换的帧
-const IDLE_FRAMES = [standImg, standBagImg, sideImg, walkImg]
+import frame01Img from '../assets/pet-runtime/frame-01.png'
+import frame02Img from '../assets/pet-runtime/frame-02.png'
+import frame03Img from '../assets/pet-runtime/frame-03.png'
+import frame04Img from '../assets/pet-runtime/frame-04.png'
+import frame05Img from '../assets/pet-runtime/frame-05.png'
+import frame06Img from '../assets/pet-runtime/frame-06.png'
+import frame07Img from '../assets/pet-runtime/frame-07.png'
 
 // 启动/长时间未互动后的打招呼语料
 const GREET_LINES = ['Hi~我上班了', '今天也要一起加油呀', '嘿,回来啦?']
@@ -17,9 +14,18 @@ const GREET_LINES = ['Hi~我上班了', '今天也要一起加油呀', '嘿,回�
 const GREET_DURATION = 3000
 const IDLE_GREET_THRESHOLD = 3 * 60 * 1000 // 3 分钟
 
-// 单击互动动画（按顺序循环）
-type ClickAnim = 'jump' | 'squash' | 'tilt'
-const CLICK_CYCLE: ClickAnim[] = ['jump', 'squash', 'tilt']
+// 点击反馈使用一组稳定的正面姿势帧，避免不同构图之间硬切。
+type ClickAnim = 'pat'
+type ClickFrame = { image: string; duration: number }
+const PAT_FRAMES: ClickFrame[] = [
+    { image: frame01Img, duration: 110 },
+    { image: frame02Img, duration: 100 },
+    { image: frame03Img, duration: 120 },
+    { image: frame04Img, duration: 150 },
+    { image: frame05Img, duration: 180 },
+    { image: frame07Img, duration: 120 },
+    { image: frame01Img, duration: 160 },
+]
 
 // 随机闲聊语料
 const CHITCHAT: string[] = [
@@ -47,9 +53,28 @@ const BASE_HEIGHT = 200
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.0
 
+function isAshareTradingSession(date: Date = new Date()): boolean {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(date)
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+    if (values.weekday === '周六' || values.weekday === '周日') return false
+    const minuteOfDay = Number(values.hour) * 60 + Number(values.minute)
+    return (
+        (minuteOfDay >= 9 * 60 + 25 && minuteOfDay <= 11 * 60 + 35) ||
+        (minuteOfDay >= 12 * 60 + 55 && minuteOfDay <= 15 * 60 + 5)
+    )
+}
+
 const Pet: React.FC = () => {
-    const [frameIdx, setFrameIdx] = useState(0)
     const [clickAnim, setClickAnim] = useState<ClickAnim | null>(null)
+    const [clickFrameIdx, setClickFrameIdx] = useState(0)
+    const [patRun, setPatRun] = useState(0)
+    const [isDragging, setIsDragging] = useState(false)
     const [bubble, setBubble] = useState<BubbleMessage | null>(null)
     const [scale, setScale] = useState(1)
     const [isGreeting, setIsGreeting] = useState(false)
@@ -59,21 +84,11 @@ const Pet: React.FC = () => {
     const dragRef = useRef({ startX: 0, startY: 0, winX: 0, winY: 0 })
     const petRef = useRef<HTMLDivElement>(null)
     const bubbleIdRef = useRef(0)
-    const clickCycleRef = useRef(0)
-    const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const greetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const lastInteractionRef = useRef<number>(Date.now())
     const bizStateRef = useRef<BizState>('idle')
-
-    // 待机帧轮换
-    useEffect(() => {
-        const timer = setInterval(() => {
-            if (clickAnim) return
-            setFrameIdx((i) => (i + 1) % IDLE_FRAMES.length)
-        }, 5000)
-        return () => clearInterval(timer)
-    }, [clickAnim])
+    const marketCheckInFlightRef = useRef(false)
 
     // 显示气泡
     const showBubble = useCallback((text: string) => {
@@ -133,12 +148,27 @@ const Pet: React.FC = () => {
     // 触发单击动画
     const triggerClickAnim = useCallback(() => {
         lastInteractionRef.current = Date.now()
-        const next = CLICK_CYCLE[clickCycleRef.current % CLICK_CYCLE.length]
-        clickCycleRef.current += 1
-        setClickAnim(next)
-        if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
-        clickTimerRef.current = setTimeout(() => setClickAnim(null), 700)
+        setPatRun((run) => run + 1)
+        setClickFrameIdx(0)
+        setClickAnim('pat')
     }, [])
+
+    // 每次点击播放一组姿势帧，最后回到待机状态；重复点击会从第一帧重播。
+    useEffect(() => {
+        if (!clickAnim) return
+
+        const frame = PAT_FRAMES[clickFrameIdx]
+        const timer = setTimeout(() => {
+            if (clickFrameIdx >= PAT_FRAMES.length - 1) {
+                setClickAnim(null)
+                setClickFrameIdx(0)
+                return
+            }
+            setClickFrameIdx((index) => index + 1)
+        }, frame.duration)
+
+        return () => clearTimeout(timer)
+    }, [clickAnim, clickFrameIdx, patRun])
 
     // 鼠标按下：区分拖动 vs 点击
     const handleMouseDown = async (e: React.MouseEvent): Promise<void> => {
@@ -164,6 +194,9 @@ const Pet: React.FC = () => {
             const dy = e.screenY - dragRef.current.startY
             if (!dragMovedRef.current && dx * dx + dy * dy > 25) {
                 dragMovedRef.current = true
+                setIsDragging(true)
+                setClickAnim(null)
+                setClickFrameIdx(0)
             }
             if (dragMovedRef.current) {
                 window.electron.ipcRenderer.invoke(
@@ -177,6 +210,7 @@ const Pet: React.FC = () => {
             if (!isDraggingRef.current) return
             const wasClick = !dragMovedRef.current
             isDraggingRef.current = false
+            setIsDragging(false)
             if (wasClick) triggerClickAnim()
         }
         document.addEventListener('mousemove', handleMouseMove)
@@ -210,6 +244,8 @@ const Pet: React.FC = () => {
     useEffect(() => {
         let cancelled = false
         const checkMarket = async (): Promise<void> => {
+            if (!isAshareTradingSession() || marketCheckInFlightRef.current) return
+            marketCheckInFlightRef.current = true
             try {
                 const watchlist = await window.api.watchlist.getAll()
                 if (!watchlist || watchlist.length === 0) return
@@ -226,6 +262,8 @@ const Pet: React.FC = () => {
                 )
             } catch {
                 // 忽略：不需要的话不影响桌宠
+            } finally {
+                marketCheckInFlightRef.current = false
             }
         }
         const interval = setInterval(checkMarket, 30000)
@@ -256,14 +294,15 @@ const Pet: React.FC = () => {
         }
     }, [showBubble])
 
-    const currentImage =
-        clickAnim === 'jump'
-            ? happyImg
-            : isGreeting
-              ? greetImg
-              : bubble
-                ? talkImg
-                : IDLE_FRAMES[frameIdx]
+    const currentImage = clickAnim
+        ? PAT_FRAMES[clickFrameIdx].image
+        : isGreeting
+          ? frame05Img
+          : bubble
+            ? frame03Img
+            : isDragging
+              ? frame06Img
+              : frame01Img
 
     return (
         <div
@@ -350,7 +389,6 @@ const Pet: React.FC = () => {
                     align-items: flex-end;
                     justify-content: center;
                     transform-origin: 50% 100%;
-                    animation: idleFloat 3s ease-in-out infinite;
                 }
                 .pet-image {
                     width: 100%;
@@ -360,38 +398,15 @@ const Pet: React.FC = () => {
                     -webkit-user-drag: none;
                 }
 
-                .pet.jump {
-                    animation: petJump 0.65s cubic-bezier(0.34, 1.56, 0.64, 1);
+                .pet.pat {
+                    animation: petPat 940ms ease-out;
                 }
-                .pet.squash {
-                    animation: petSquash 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
-                }
-                .pet.tilt {
-                    animation: petTilt 0.7s ease-in-out;
-                }
-
-                @keyframes idleFloat {
-                    0%, 100% { transform: translateY(0); }
-                    50% { transform: translateY(-4px); }
-                }
-                @keyframes petJump {
-                    0%   { transform: translateY(0)     scaleY(1); }
-                    20%  { transform: translateY(0)     scaleY(0.85); }
-                    50%  { transform: translateY(-32px) scaleY(1.05); }
-                    80%  { transform: translateY(0)     scaleY(0.92); }
-                    100% { transform: translateY(0)     scaleY(1); }
-                }
-                @keyframes petSquash {
-                    0%   { transform: scaleX(1)    scaleY(1); }
-                    30%  { transform: scaleX(1.25) scaleY(0.6); }
-                    60%  { transform: scaleX(0.9)  scaleY(1.15); }
-                    100% { transform: scaleX(1)    scaleY(1); }
-                }
-                @keyframes petTilt {
-                    0%   { transform: rotate(0); }
-                    25%  { transform: rotate(-14deg); }
-                    60%  { transform: rotate(12deg); }
-                    100% { transform: rotate(0); }
+                @keyframes petPat {
+                    0%, 100% { transform: translateY(0) scale(1); }
+                    18% { transform: translateY(1px) scale(0.99, 0.985); }
+                    42% { transform: translateY(-2px) scale(1.01, 1); }
+                    68% { transform: translateY(0) rotate(-1deg); }
+                    84% { transform: translateY(0) rotate(1deg); }
                 }
                 @keyframes bubbleIn {
                     0%   { opacity: 0; transform: translateX(-50%) translateY(6px); }

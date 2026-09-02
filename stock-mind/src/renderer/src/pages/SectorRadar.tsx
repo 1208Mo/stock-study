@@ -553,7 +553,9 @@ export default function SectorRadar() {
                             <span className="summary-icon">{up ? '🔴' : '🟢'}</span>
                             <div className="summary-content">
                                 <span className="summary-label">{s.name}</span>
-                                <span className="summary-value">{formatFlow(s.mainNet)}</span>
+                                <span className="summary-value">
+                                    {Number.isFinite(s.price) ? s.price.toFixed(2) : '--'}
+                                </span>
                                 <span className={up ? 'up' : 'down'}>
                                     {up ? '+' : ''}
                                     {s.changePercent.toFixed(2)}% · 主力

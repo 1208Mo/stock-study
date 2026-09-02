@@ -131,22 +131,54 @@ async function fetchQuoteFromSina(code: string): Promise<QuoteData> {
     }
 }
 
+// 页面（桌宠、持仓、自选股）会同时轮询行情。短缓存和请求合并可以避免
+// 网络异常时每个轮询器都各自等待两次超时，最终把请求堆积到主进程。
+const QUOTE_CACHE_TTL_MS = 3000
+const MAX_QUOTE_CONCURRENCY = 6
+const quoteCache = new Map<string, { value: QuoteData; expiresAt: number }>()
+const quoteInFlight = new Map<string, Promise<QuoteData>>()
+
 // 主入口：东方财富优先，失败后 fallback 新浪
-export async function fetchQuote(code: string): Promise<QuoteData> {
+export function fetchQuote(code: string): Promise<QuoteData> {
     const normalizedCode = code.trim()
-    try {
-        return await fetchQuoteFromEastmoney(normalizedCode)
-    } catch {
-        return await fetchQuoteFromSina(normalizedCode)
-    }
+    const cached = quoteCache.get(normalizedCode)
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
+
+    const pending = quoteInFlight.get(normalizedCode)
+    if (pending) return pending
+
+    const request = (async () => {
+        try {
+            return await fetchQuoteFromEastmoney(normalizedCode)
+        } catch {
+            return await fetchQuoteFromSina(normalizedCode)
+        }
+    })()
+        .then((quote) => {
+            quoteCache.set(normalizedCode, {
+                value: quote,
+                expiresAt: Date.now() + QUOTE_CACHE_TTL_MS,
+            })
+            return quote
+        })
+        .finally(() => quoteInFlight.delete(normalizedCode))
+
+    quoteInFlight.set(normalizedCode, request)
+    return request
 }
 
-// 批量获取行情
+// 批量获取行情。分批执行，避免自选股较多或上游超时时瞬间创建大量连接。
 export async function fetchBatchQuotes(codes: string[]): Promise<QuoteData[]> {
-    const results = await Promise.allSettled(codes.map((c) => fetchQuote(c)))
-    return results
-        .filter((r): r is PromiseFulfilledResult<QuoteData> => r.status === 'fulfilled')
-        .map((r) => r.value)
+    const normalizedCodes = [...new Set(codes.map((code) => code.trim()).filter(Boolean))]
+    const output: QuoteData[] = []
+    for (let i = 0; i < normalizedCodes.length; i += MAX_QUOTE_CONCURRENCY) {
+        const batch = normalizedCodes.slice(i, i + MAX_QUOTE_CONCURRENCY)
+        const results = await Promise.allSettled(batch.map((code) => fetchQuote(code)))
+        for (const result of results) {
+            if (result.status === 'fulfilled') output.push(result.value)
+        }
+    }
+    return output
 }
 
 // 东方财富 K 线数据（日线）

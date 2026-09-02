@@ -102,7 +102,7 @@ export default function StockDetail() {
     useEffect(() => {
         if (!code) return
         function refreshQuote() {
-            if (!code) return
+            if (!code || document.visibilityState !== 'visible') return
             window.api.market
                 .getQuote(code)
                 .then((q) =>

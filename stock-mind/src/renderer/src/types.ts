@@ -247,6 +247,7 @@ export interface CapitalFlowDaily {
 export interface MarketFlowSnapshot {
     name: string
     code: string
+    price: number
     changePercent: number
     mainNet: number
     superLargeNet: number

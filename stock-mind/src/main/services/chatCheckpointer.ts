@@ -27,6 +27,7 @@ import {
     clearThreadState,
     loadAllCheckpoints,
     loadAllWrites,
+    pruneThreadCheckpoints,
     upsertCheckpoint,
     upsertWrite,
 } from '../db'
@@ -125,6 +126,49 @@ export class SqlJsCheckpointSaver extends MemorySaver {
     async deleteThread(threadId: string): Promise<void> {
         await super.deleteThread(threadId)
         clearThreadState(threadId)
+    }
+
+    /**
+     * A checkpoint contains the complete Agent state, so keeping every historical snapshot
+     * duplicates the full conversation many times. Once a turn is complete, only the newest
+     * snapshot per namespace is needed to resume the conversation.
+     */
+    compactThread(threadId: string): void {
+        const namespaces = this.storage[threadId]
+        if (!namespaces) return
+
+        const keep: Array<{ checkpointNs: string; checkpointId: string }> = []
+        let needsPruning = false
+        for (const [checkpointNs, checkpoints] of Object.entries(namespaces)) {
+            const checkpointIds = Object.keys(checkpoints)
+            const latestId = checkpointIds.sort((a, b) => b.localeCompare(a))[0]
+            if (!latestId) continue
+            needsPruning ||= checkpointIds.length > 1
+
+            const latest = checkpoints[latestId]
+            // The latest checkpoint is self-contained; its parent is no longer needed.
+            namespaces[checkpointNs] = Object.assign(Object.create(null), {
+                [latestId]: [latest[0], latest[1]],
+            })
+            keep.push({ checkpointNs, checkpointId: latestId })
+        }
+
+        const keepKeys = new Set(
+            keep.map(({ checkpointNs, checkpointId }) =>
+                JSON.stringify([threadId, checkpointNs, checkpointId])
+            )
+        )
+        for (const key of Object.keys(this.writes)) {
+            const [storedThreadId] = JSON.parse(key) as [string, string, string]
+            if (storedThreadId === threadId && !keepKeys.has(key)) {
+                delete this.writes[key]
+                needsPruning = true
+            }
+        }
+
+        if (needsPruning) {
+            pruneThreadCheckpoints(threadId, keep)
+        }
     }
 }
 

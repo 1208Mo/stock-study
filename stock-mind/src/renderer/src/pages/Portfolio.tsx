@@ -75,6 +75,7 @@ export default function Portfolio() {
     useEffect(() => {
         fetchHoldings()
         const interval = setInterval(() => {
+            if (document.visibilityState !== 'visible') return
             useHoldingsStore.getState().refreshQuotes()
             setLastRefresh(Date.now())
         }, 30000)

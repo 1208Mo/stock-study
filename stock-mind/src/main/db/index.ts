@@ -1089,11 +1089,16 @@ export function appendChatMessage(
     content: string,
     toolCalls?: unknown,
     images?: ImageContent[]
-): void {
+): number {
     run(
         'INSERT INTO chat_messages (session_id, role, content, tool_calls, images) VALUES (?, ?, ?, ?, ?)',
         [sessionId, role, content, toolCalls ? JSON.stringify(toolCalls) : null, images ? JSON.stringify(images) : null]
     )
+    return get<{ id: number }>('SELECT last_insert_rowid() AS id')!.id
+}
+
+export function deleteChatMessage(id: number): void {
+    run('DELETE FROM chat_messages WHERE id = ?', [id])
 }
 
 // Chat checkpoints
@@ -1164,6 +1169,23 @@ export function upsertWrite(row: WriteRow): void {
 export function clearThreadState(threadId: string): void {
     runNoPersist('DELETE FROM chat_checkpoints WHERE thread_id = ?', [threadId])
     runNoPersist('DELETE FROM chat_writes WHERE thread_id = ?', [threadId])
+    flush()
+}
+
+export function pruneThreadCheckpoints(
+    threadId: string,
+    keep: Array<{ checkpointNs: string; checkpointId: string }>
+): void {
+    for (const { checkpointNs, checkpointId } of keep) {
+        runNoPersist(
+            'DELETE FROM chat_checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?',
+            [threadId, checkpointNs, checkpointId]
+        )
+        runNoPersist(
+            'DELETE FROM chat_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id <> ?',
+            [threadId, checkpointNs, checkpointId]
+        )
+    }
     flush()
 }
 
