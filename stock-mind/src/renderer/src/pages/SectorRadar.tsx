@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
+import { useChartTheme } from '../utils/chartTheme'
 import type {
     CapitalFlowDaily,
     MarketFlowSnapshot,
@@ -28,6 +29,7 @@ const INDEX_TARGETS: FlowChartTarget[] = [
 const DAY_OPTIONS = [30, 60, 90]
 
 export default function SectorRadar() {
+    const theme = useChartTheme()
     // ② 大盘资金速览
     const [snapshots, setSnapshots] = useState<MarketFlowSnapshot[]>([])
     const [snapshotLoading, setSnapshotLoading] = useState(false)
@@ -192,7 +194,7 @@ export default function SectorRadar() {
                     if (!item) return ''
                     return (
                         `${item.name}<br/>` +
-                        `成交额: <b style="color:${item.mainNet >= 0 ? '#ef5350' : '#26a69a'}">${formatFlow(item.mainNet)}</b><br/>` +
+                        `成交额: <b style="color:${item.mainNet >= 0 ? theme.up : theme.down}">${formatFlow(item.mainNet)}</b><br/>` +
                         `涨跌幅: ${item.changePercent.toFixed(2)}%`
                     )
                 },
@@ -200,18 +202,18 @@ export default function SectorRadar() {
             xAxis: {
                 type: 'value',
                 axisLabel: {
-                    color: '#9ca3af',
+                    color: theme.axis,
                     fontSize: 10,
                     formatter: (v: number) => formatFlow(v),
                 },
                 axisLine: { show: false },
-                splitLine: { lineStyle: { color: 'rgba(156,163,175,0.15)', type: 'dashed' } },
+                splitLine: { lineStyle: { color: theme.split, type: 'dashed' } },
             },
             yAxis: {
                 type: 'category',
                 data: sorted.map((d) => d.name),
-                axisLine: { lineStyle: { color: '#9ca3af' } },
-                axisLabel: { color: '#d1d5db', fontSize: 11 },
+                axisLine: { lineStyle: { color: theme.axis } },
+                axisLabel: { color: theme.text, fontSize: 11 },
                 axisTick: { show: false },
             },
             series: [
@@ -223,7 +225,7 @@ export default function SectorRadar() {
                         label: {
                             show: true,
                             position: 'right',
-                            color: '#9ca3af',
+                            color: theme.axis,
                             fontSize: 10,
                             formatter: () => formatFlow(d.mainNet),
                         },
@@ -232,7 +234,7 @@ export default function SectorRadar() {
                 },
             ],
         }
-    }, [sectorFlow])
+    }, [sectorFlow, theme])
 
     // 资金迁移桑基图 echarts option：
     // 左侧=跌幅板块（资金流出方，绿），右侧=涨幅板块（资金流入方，红）
@@ -255,11 +257,11 @@ export default function SectorRadar() {
         const nodes = [
             ...outflow.map((s) => ({
                 name: `流出·${s.name}`,
-                itemStyle: { color: '#26a69a' },
+                itemStyle: { color: theme.down },
             })),
             ...inflow.map((s) => ({
                 name: `流入·${s.name}`,
-                itemStyle: { color: '#ef5350' },
+                itemStyle: { color: theme.up },
             })),
         ]
         const links = []
@@ -307,13 +309,13 @@ export default function SectorRadar() {
                     nodeWidth: 14,
                     nodeGap: 6,
                     layoutIterations: 64,
-                    label: { color: '#d1d5db', fontSize: 11, position: 'right' },
+                    label: { color: theme.text, fontSize: 11, position: 'right' },
                     lineStyle: { color: 'gradient', opacity: 0.35, curveness: 0.5 },
                     emphasis: { focus: 'adjacency' },
                 },
             ],
         }
-    }, [sectorFlow])
+    }, [sectorFlow, theme])
 
     // ③ 主图 echarts option：双轴（主力净流入柱 + 收盘价折线）
     const flowOption = useMemo(() => {
@@ -324,7 +326,7 @@ export default function SectorRadar() {
             grid: { left: 64, right: 56, top: 40, bottom: 28 },
             tooltip: {
                 trigger: 'axis',
-                axisPointer: { type: 'cross', crossStyle: { color: '#9ca3af' } },
+                axisPointer: { type: 'cross', crossStyle: { color: theme.axis } },
                 formatter: (
                     params: Array<{ axisValue: string; value: number; seriesName: string }>
                 ) => {
@@ -341,13 +343,13 @@ export default function SectorRadar() {
             legend: {
                 data: ['主力净流入', '收盘价'],
                 top: 4,
-                textStyle: { color: '#9ca3af', fontSize: 11 },
+                textStyle: { color: theme.axis, fontSize: 11 },
             },
             xAxis: {
                 type: 'category',
                 data: dates,
-                axisLine: { lineStyle: { color: '#9ca3af' } },
-                axisLabel: { color: '#9ca3af', fontSize: 10 },
+                axisLine: { lineStyle: { color: theme.axis } },
+                axisLabel: { color: theme.axis, fontSize: 10 },
                 axisTick: { show: false },
             },
             yAxis: [
@@ -356,19 +358,19 @@ export default function SectorRadar() {
                     name: '主力净流入',
                     position: 'left',
                     axisLabel: {
-                        color: '#9ca3af',
+                        color: theme.axis,
                         fontSize: 10,
                         formatter: (v: number) => formatFlow(v),
                     },
                     axisLine: { show: false },
-                    splitLine: { lineStyle: { color: 'rgba(156,163,175,0.15)', type: 'dashed' } },
+                    splitLine: { lineStyle: { color: theme.split, type: 'dashed' } },
                 },
                 {
                     type: 'value',
                     name: '收盘价',
                     position: 'right',
                     scale: true,
-                    axisLabel: { color: '#9ca3af', fontSize: 10 },
+                    axisLabel: { color: theme.axis, fontSize: 10 },
                     axisLine: { show: false },
                     splitLine: { show: false },
                 },
@@ -381,13 +383,13 @@ export default function SectorRadar() {
                     barWidth: '60%',
                     itemStyle: {
                         color: (params: { value: number }) =>
-                            params.value >= 0 ? '#ef5350' : '#26a69a',
+                            params.value >= 0 ? theme.up : theme.down,
                     },
                     markLine: {
                         symbol: 'none',
                         silent: true,
                         data: [{ yAxis: 0 }],
-                        lineStyle: { color: '#6b7280', width: 1, type: 'dashed' },
+                        lineStyle: { color: theme.axis, width: 1, type: 'dashed' },
                     },
                 },
                 {
@@ -403,7 +405,7 @@ export default function SectorRadar() {
                 },
             ],
         }
-    }, [flowData])
+    }, [flowData, theme])
 
     // ③ 量价图 echarts option：成交量柱（按涨跌着色）+ 收盘价折线
     const priceOption = useMemo(() => {
@@ -413,7 +415,7 @@ export default function SectorRadar() {
             grid: { left: 64, right: 56, top: 40, bottom: 28 },
             tooltip: {
                 trigger: 'axis',
-                axisPointer: { type: 'cross', crossStyle: { color: '#9ca3af' } },
+                axisPointer: { type: 'cross', crossStyle: { color: theme.axis } },
                 formatter: (
                     params: Array<{ axisValue: string; value: number; seriesName: string }>
                 ) => {
@@ -430,13 +432,13 @@ export default function SectorRadar() {
             legend: {
                 data: ['成交量', '收盘价'],
                 top: 4,
-                textStyle: { color: '#9ca3af', fontSize: 11 },
+                textStyle: { color: theme.axis, fontSize: 11 },
             },
             xAxis: {
                 type: 'category',
                 data: dates,
-                axisLine: { lineStyle: { color: '#9ca3af' } },
-                axisLabel: { color: '#9ca3af', fontSize: 10 },
+                axisLine: { lineStyle: { color: theme.axis } },
+                axisLabel: { color: theme.axis, fontSize: 10 },
                 axisTick: { show: false },
             },
             yAxis: [
@@ -445,19 +447,19 @@ export default function SectorRadar() {
                     name: '成交量',
                     position: 'left',
                     axisLabel: {
-                        color: '#9ca3af',
+                        color: theme.axis,
                         fontSize: 10,
                         formatter: (v: number) => formatFlow(v),
                     },
                     axisLine: { show: false },
-                    splitLine: { lineStyle: { color: 'rgba(156,163,175,0.15)', type: 'dashed' } },
+                    splitLine: { lineStyle: { color: theme.split, type: 'dashed' } },
                 },
                 {
                     type: 'value',
                     name: '收盘价',
                     position: 'right',
                     scale: true,
-                    axisLabel: { color: '#9ca3af', fontSize: 10 },
+                    axisLabel: { color: theme.axis, fontSize: 10 },
                     axisLine: { show: false },
                     splitLine: { show: false },
                 },
@@ -468,7 +470,7 @@ export default function SectorRadar() {
                     type: 'bar',
                     data: klineData.map((d) => ({
                         value: d.volume,
-                        itemStyle: { color: d.close >= d.open ? '#ef5350' : '#26a69a' },
+                        itemStyle: { color: d.close >= d.open ? theme.up : theme.down },
                     })),
                     barWidth: '60%',
                 },
@@ -485,7 +487,7 @@ export default function SectorRadar() {
                 },
             ],
         }
-    }, [klineData])
+    }, [klineData, theme])
 
     // ④ 板块小折线图 option（复用 DailyDecision 样式）
     function sectorLineOption(klines: KLineData[], isUp: boolean) {
@@ -493,7 +495,7 @@ export default function SectorRadar() {
         const dates = klines.map((k) => k.date.slice(5))
         const minV = Math.min(...closes)
         const maxV = Math.max(...closes)
-        const lineColor = isUp ? '#ef5350' : '#26a69a'
+        const lineColor = isUp ? theme.up : theme.down
         return {
             grid: { left: 4, right: 4, top: 4, bottom: 18 },
             xAxis: {

@@ -11,6 +11,18 @@ export function ChatSidebar() {
 
     const [editingId, setEditingId] = useState<string | null>(null)
     const [editingTitle, setEditingTitle] = useState('')
+    // 会话列表可收起，状态持久化，下次进入沿用
+    const [collapsed, setCollapsed] = useState(
+        () => localStorage.getItem('chat_sidebar_collapsed') === '1'
+    )
+
+    function toggleCollapsed() {
+        setCollapsed((prev) => {
+            const next = !prev
+            localStorage.setItem('chat_sidebar_collapsed', next ? '1' : '0')
+            return next
+        })
+    }
 
     async function handleNew() {
         const id = await createSession()
@@ -35,13 +47,46 @@ export function ChatSidebar() {
         await deleteSession(id)
     }
 
+    if (collapsed) {
+        return (
+            <div className="chat-sidebar-collapsed">
+                <button
+                    className="chat-sidebar-toggle"
+                    onClick={toggleCollapsed}
+                    title="展开会话列表"
+                    aria-label="展开会话列表"
+                >
+                    »
+                </button>
+                <button
+                    className="chat-sidebar-new-collapsed"
+                    onClick={handleNew}
+                    title="新建对话（⌘/Ctrl+Shift+O）"
+                    aria-label="新建对话"
+                >
+                    ＋
+                </button>
+            </div>
+        )
+    }
+
     return (
         <aside className="chat-sidebar" aria-label="会话列表">
             <div className="chat-sidebar-header">
                 <div className="chat-sidebar-title">对话</div>
-                <button className="chat-sidebar-new" onClick={handleNew} title="新建对话">
-                    + 新对话
-                </button>
+                <div className="chat-sidebar-header-actions">
+                    <button className="chat-sidebar-new" onClick={handleNew} title="新建对话">
+                        + 新对话
+                    </button>
+                    <button
+                        className="chat-sidebar-toggle"
+                        onClick={toggleCollapsed}
+                        title="收起会话列表"
+                        aria-label="收起会话列表"
+                    >
+                        «
+                    </button>
+                </div>
             </div>
             <div className="chat-sidebar-list">
                 {sessions.length === 0 && (

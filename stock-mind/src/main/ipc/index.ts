@@ -70,10 +70,43 @@ import {
     AIProvider,
 } from '../services/ai'
 import { runDecisionAgent } from '../services/agent'
-import { runResearchAgent, getSessionMessagesFromCheckpoint, modelSupportsVision, analyzeImagesWithVision, type ImageContent } from '../services/researchAgent'
+import { runResearchAgent, getSessionMessagesFromCheckpoint, modelSupportsVision, analyzeImagesWithVision, extractStocksFromImage, type ImageContent } from '../services/researchAgent'
 import { reviewDecision, runPendingDecisionReviews } from '../services/decisionReview'
 
 function getConfiguredAI() {
+    // 最高优先级：环境变量中转配置（AI_API_KEY / AI_BASE_URL / AI_MODEL）
+    // 用于统一的 OpenAI 兼容中转，配好这三个变量即可全局生效，无需在设置里逐个 provider 配置。
+    const envKey = process.env.AI_API_KEY?.trim()
+    if (envKey) {
+        console.log(
+            `[AI] 使用环境变量中转 model=${process.env.AI_MODEL?.trim() || '(默认)'} baseUrl=${process.env.AI_BASE_URL?.trim() || '(默认)'}`
+        )
+        return {
+            // 中转走 OpenAI 兼容协议，provider 仅用于兜底默认值/日志展示
+            provider: 'openai' as AIProvider,
+            apiKey: envKey,
+            baseUrl: process.env.AI_BASE_URL?.trim() || undefined,
+            model: process.env.AI_MODEL?.trim() || undefined,
+        }
+    }
+
+    // 次优先级：设置页里开启的「自定义中转」（OpenAI 兼容），开启后忽略下方 provider 选择。
+    if (getSetting('ai_use_custom') === '1') {
+        const apiKey = (getSetting('ai_custom_key') ?? '').trim()
+        if (!apiKey) {
+            throw new Error('请先在设置中填写「自定义中转」的 API Key')
+        }
+        const baseUrl = getSetting('ai_custom_base_url')?.trim() || undefined
+        const model = getSetting('ai_custom_model')?.trim() || undefined
+        console.log(`[AI] 使用自定义中转 model=${model || '(默认)'} baseUrl=${baseUrl || '(默认)'}`)
+        return {
+            provider: 'openai' as AIProvider,
+            apiKey,
+            baseUrl,
+            model,
+        }
+    }
+
     const provider = (getSetting('ai_provider') ?? 'deepseek') as AIProvider
     const apiKey = (getSetting(`ai_key_${provider}`) ?? '').trim()
     if (!apiKey) {
@@ -81,6 +114,7 @@ function getConfiguredAI() {
     }
     const baseUrl = getSetting(`ai_base_url_${provider}`)?.trim() || undefined
     const model = getSetting(`ai_model_${provider}`)?.trim() || undefined
+    console.log(`[AI] 使用供应商=${provider} model=${model || '(默认)'} baseUrl=${baseUrl || '(默认)'}`)
     return { provider, apiKey, baseUrl, model }
 }
 
@@ -387,6 +421,15 @@ export function registerAllIpcHandlers(): void {
         }
     )
 
+    // 截图识别股票：供持仓管理 / 观察列表的「截图导入」使用
+    ipcMain.handle(
+        'ai:extractStocksFromImage',
+        async (_e, payload: { images: ImageContent[] }) => {
+            const { provider, apiKey, baseUrl, model } = getConfiguredAI()
+            return extractStocksFromImage(provider, apiKey, baseUrl, payload.images, model)
+        }
+    )
+
     ipcMain.handle(
         'ai:tradingT',
         async (
@@ -432,27 +475,37 @@ export function registerAllIpcHandlers(): void {
     ipcMain.handle(
         'ai:agentDecision',
         async (
-            _e,
+            event,
             payload: {
                 date: string
                 candidateCodes: Array<{ code: string; name: string }>
                 capital?: number
                 riskLevel?: string
+                requestId?: string
             }
         ) => {
             const { provider, apiKey, baseUrl, model } = getConfiguredAI()
             const profile = getInvestorProfile()
-            const output = await runDecisionAgent({
-                provider,
-                apiKey,
-                baseUrl,
-                model,
-                date: payload.date,
-                candidateCodes: payload.candidateCodes,
-                capital: payload.capital,
-                riskLevel: payload.riskLevel,
-                userProfile: formatInvestorProfileFull(profile),
-            })
+            const requestId = payload.requestId
+            const output = await runDecisionAgent(
+                {
+                    provider,
+                    apiKey,
+                    baseUrl,
+                    model,
+                    date: payload.date,
+                    candidateCodes: payload.candidateCodes,
+                    capital: payload.capital,
+                    riskLevel: payload.riskLevel,
+                    userProfile: formatInvestorProfileFull(profile),
+                },
+                // 逐节点进度回调 → 推送给渲染层做实时提示
+                (progress) => {
+                    if (requestId && !event.sender.isDestroyed()) {
+                        event.sender.send('ai:agentDecision:progress', { requestId, ...progress })
+                    }
+                }
+            )
             const savedDecisionId = saveDecision({
                 decisionDate: payload.date,
                 marketContext: output.marketContext,

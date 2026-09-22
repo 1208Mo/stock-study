@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useWatchlistStore } from '../stores/watchlistStore'
 import type { WatchItem } from '../types'
+import SectorEditModal from '../components/SectorEditModal'
 
 // 从文本中解析股票代码
 function parseCodesFromText(text: string): string[] {
@@ -42,6 +43,8 @@ export default function Watchlist() {
     const [batchParsed, setBatchParsed] = useState<string[]>([])
     const [batchImporting, setBatchImporting] = useState(false)
     const [batchMsg, setBatchMsg] = useState('')
+    const [imageAnalyzing, setImageAnalyzing] = useState(false)
+    const batchFileRef = useRef<HTMLInputElement>(null)
 
     // 分组管理
     const [activeGroup, setActiveGroup] = useState<string>('')
@@ -149,19 +152,57 @@ export default function Watchlist() {
         setKeyword('')
     }
 
-    // 点击板块标签编辑（自选股无编辑 modal，用 prompt 轻量实现）
-    async function handleEditSector(item: WatchItem) {
-        const newSector = window.prompt('请输入板块（如：科技）', item.sector ?? '')
-        if (newSector === null) return
-        const newSubSector = window.prompt('请输入细分板块（如：半导体）', item.sub_sector ?? '')
-        if (newSubSector === null) return
-        await updateSector(item.id, newSector.trim(), newSubSector.trim())
-    }
+    // 点击板块标签用轻量 Modal 编辑（替代此前连续两个 window.prompt）
+    const [editingSectorItem, setEditingSectorItem] = useState<WatchItem | null>(null)
 
     function handleBatchTextChange(text: string) {
         setBatchText(text)
         setBatchParsed(parseCodesFromText(text))
         setBatchMsg('')
+    }
+
+    function fileToDataUrl(file: File): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result as string)
+            reader.onerror = reject
+            reader.readAsDataURL(file)
+        })
+    }
+
+    // 截图识别导入：多模态模型识别后回填到文本框（复用文本解析预览流程）
+    async function handleBatchImagePick(e: React.ChangeEvent<HTMLInputElement>) {
+        const files = e.target.files
+        if (!files || files.length === 0) return
+        setImageAnalyzing(true)
+        setBatchMsg('')
+        try {
+            const images: Array<{ id: string; dataUrl: string; name: string; type: string }> = []
+            for (const file of Array.from(files)) {
+                if (!file.type.startsWith('image/')) continue
+                const dataUrl = await fileToDataUrl(file)
+                images.push({
+                    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                    dataUrl,
+                    name: file.name || '截图',
+                    type: file.type,
+                })
+            }
+            if (images.length === 0) return
+            const stocks = await window.api.ai.extractStocksFromImage({ images })
+            if (stocks.length === 0) {
+                setBatchMsg('未从截图中识别到股票，可改用手动粘贴文字')
+            } else {
+                const lines = stocks.map((s) => `${s.code} ${s.name}`).join('\n')
+                handleBatchTextChange((batchText ? batchText + '\n' : '') + lines)
+                setBatchMsg(`已识别 ${stocks.length} 只股票，请核对后点击添加`)
+            }
+        } catch (err) {
+            setBatchMsg(err instanceof Error ? err.message : '识图失败')
+        } finally {
+            setImageAnalyzing(false)
+            e.target.value = ''
+        }
     }
 
     async function handleBatchImport() {
@@ -283,7 +324,22 @@ export default function Watchlist() {
             {/* 批量导入 */}
             <div className="batch-import-box">
                 <div className="batch-import-header">
-                    <span className="batch-import-label">批量导入（粘贴截图文字或代码列表）</span>
+                    <span className="batch-import-label">批量导入（上传截图识别，或粘贴文字 / 代码列表）</span>
+                    <button
+                        className="btn-small"
+                        onClick={() => batchFileRef.current?.click()}
+                        disabled={imageAnalyzing}
+                    >
+                        {imageAnalyzing ? '识别中...' : '📷 截图识别'}
+                    </button>
+                    <input
+                        ref={batchFileRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        style={{ display: 'none' }}
+                        onChange={handleBatchImagePick}
+                    />
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                     <textarea
@@ -358,7 +414,7 @@ export default function Watchlist() {
                                 className={`watchlist-item ${quote && quote.changePercent >= 0 ? 'up' : quote && quote.changePercent < 0 ? 'down' : ''}`}
                                 onClick={() =>
                                     navigate(
-                                        `/realtime/${item.code}?name=${encodeURIComponent(item.name)}`
+                                        `/stock/${item.code}?name=${encodeURIComponent(item.name)}`
                                     )
                                 }
                             >
@@ -371,7 +427,7 @@ export default function Watchlist() {
                                             title="点击编辑板块"
                                             onClick={(e) => {
                                                 e.stopPropagation()
-                                                handleEditSector(item)
+                                                setEditingSectorItem(item)
                                             }}
                                         >
                                             {[item.sector, item.sub_sector].filter(Boolean).join(' · ')}
@@ -429,11 +485,11 @@ export default function Watchlist() {
                                         onClick={(e) => {
                                             e.stopPropagation()
                                             navigate(
-                                                `/stock/${item.code}?name=${encodeURIComponent(item.name)}`
+                                                `/realtime/${item.code}?name=${encodeURIComponent(item.name)}`
                                             )
                                         }}
                                     >
-                                        K线
+                                        分时
                                     </button>
                                     <button
                                         className="btn-danger-small"
@@ -449,6 +505,18 @@ export default function Watchlist() {
                         )
                     })}
                 </div>
+            )}
+
+            {editingSectorItem && (
+                <SectorEditModal
+                    title={editingSectorItem.name}
+                    initialSector={editingSectorItem.sector ?? ''}
+                    initialSubSector={editingSectorItem.sub_sector ?? ''}
+                    onClose={() => setEditingSectorItem(null)}
+                    onSave={(sector, subSector) =>
+                        updateSector(editingSectorItem.id, sector, subSector)
+                    }
+                />
             )}
         </div>
     )

@@ -2,10 +2,13 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ChatSidebar } from '../components/ChatSidebar'
+import DecisionHistory from './DecisionHistory'
+import DecisionCard from '../components/DecisionCard'
 import { useChatSessionsStore, type ChatMessage } from '../stores/chatSessionsStore'
 import type { ResearchToolTrace, ImageContent } from '../types'
 
 const SUGGESTIONS = [
+    '📅 今天买什么？帮我生成今日计划',
     '今天有哪些强势股值得关注？',
     '帮我分析一下今日市场热点板块',
     '推荐几只近期可能大涨的股票',
@@ -16,6 +19,17 @@ const SUGGESTIONS = [
     '今天有什么短线机会？',
 ]
 
+// 判断是否为「生成今日计划」意图 —— 命中则走多智能体决策 Agent，并把结果渲染成卡片
+function isDecisionIntent(text: string): boolean {
+    const t = text.trim()
+    if (!t) return false
+    return (
+        /(今天|今日|盘前).*(买什么|买啥|买点|计划|选股|操作|机会)/.test(t) ||
+        /生成.*(今日)?(计划|决策)/.test(t) ||
+        /帮我选股|今日计划|盘前计划|每日决策/.test(t)
+    )
+}
+
 const SCROLL_THRESHOLD = 120 // px：距底部这么近才自动跟随
 
 const MessageBubble = memo(function MessageBubble({
@@ -24,12 +38,14 @@ const MessageBubble = memo(function MessageBubble({
     onRegenerate,
     onFeedback,
     analyzingMessage,
+    onOpenFull,
 }: {
     msg: ChatMessage
     onCopy: (content: string) => void
     onRegenerate: (content: string) => void
     onFeedback: (content: string, type: 'positive' | 'negative') => void
     analyzingMessage?: string | null
+    onOpenFull: () => void
 }) {
     const isAssistant = msg.role === 'assistant'
     const isStreaming = !!msg.pending && isAssistant
@@ -37,11 +53,50 @@ const MessageBubble = memo(function MessageBubble({
 
     const hasImages = msg.images && msg.images.length > 0
 
+    // 今日计划卡片：生成中显示 Agent 进度，完成后渲染 DecisionCard
+    if (msg.kind === 'decision') {
+        return (
+            <div className="chat-bubble-wrap assistant">
+                <div className="chat-avatar chat-avatar-ai" aria-hidden="true">
+                    🦑
+                </div>
+                <div className="chat-bubble-col">
+                    <div className="chat-bubble assistant chat-decision-bubble">
+                        {msg.pending ? (
+                            <div className="chat-decision-progress">
+                                <div className="chat-analyzing-message">
+                                    <span className="chat-dot" />
+                                    <span>
+                                        {msg.progress?.[msg.progress.length - 1] ??
+                                            '小墨鱼团队分析中…'}
+                                    </span>
+                                </div>
+                                {msg.progress && msg.progress.length > 1 && (
+                                    <ul className="agent-progress-list">
+                                        {msg.progress.slice(0, -1).map((s, i) => (
+                                            <li key={i} className="done">
+                                                <span className="tick">✓</span> {s}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
+                        ) : msg.decision ? (
+                            <DecisionCard data={msg.decision} onOpenFull={onOpenFull} />
+                        ) : (
+                            <span>{msg.content}</span>
+                        )}
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
     return (
         <div className={`chat-bubble-wrap ${msg.role}`}>
             {isAssistant && (
                 <div className="chat-avatar chat-avatar-ai" aria-hidden="true">
-                    AI
+                    🦑
                 </div>
             )}
             <div className="chat-bubble-col">
@@ -136,6 +191,11 @@ const MessageBubble = memo(function MessageBubble({
                     </div>
                 )}
             </div>
+            {!isAssistant && (
+                <div className="chat-avatar chat-avatar-user" aria-hidden="true">
+                    我
+                </div>
+            )}
         </div>
     )
 })
@@ -151,8 +211,18 @@ export default function AIChat() {
     const updatePendingMessage = useChatSessionsStore((s) => s.updatePendingMessage)
     const finalizePendingMessage = useChatSessionsStore((s) => s.finalizePendingMessage)
     const replaceMessages = useChatSessionsStore((s) => s.replaceMessages)
+    const createSession = useChatSessionsStore((s) => s.createSession)
+    const setActive = useChatSessionsStore((s) => s.setActive)
 
     const [input, setInput] = useState('')
+    // 小墨鱼内部标签：对话 / 每日计划（含决策记忆与命中追踪）
+    const [aiTab, setAiTab] = useState<'chat' | 'plan'>(() =>
+        localStorage.getItem('ai_tab') === 'plan' ? 'plan' : 'chat'
+    )
+    function switchTab(t: 'chat' | 'plan') {
+        setAiTab(t)
+        localStorage.setItem('ai_tab', t)
+    }
     const [sending, setSending] = useState(false)
     const [error, setError] = useState('')
     const [toastMessage, setToastMessage] = useState<string | null>(null)
@@ -169,6 +239,27 @@ export default function AIChat() {
     const failedRequestRef = useRef<{ content: string; images?: ImageContent[] } | null>(null)
     const isNearBottomRef = useRef(true)
     const dragCounterRef = useRef(0)
+
+    // 新建对话：顶栏按钮 + 快捷键（⌘/Ctrl+Shift+O），无论当前在哪个标签都切回对话并聚焦输入框
+    const handleNewChat = useCallback(async () => {
+        const id = await createSession()
+        await setActive(id)
+        switchTab('chat')
+        setInput('')
+        setError('')
+        setTimeout(() => inputRef.current?.focus(), 0)
+    }, [createSession, setActive])
+
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+                e.preventDefault()
+                void handleNewChat()
+            }
+        }
+        window.addEventListener('keydown', handler)
+        return () => window.removeEventListener('keydown', handler)
+    }, [handleNewChat])
 
     // 首次挂载时加载会话
     useEffect(() => {
@@ -292,9 +383,89 @@ export default function AIChat() {
         ]
     )
 
+    // 在对话流内触发多智能体决策 Agent，并把结构化结果渲染成「今日计划」卡片
+    const runDecision = useCallback(
+        (text: string): void => {
+            const sessionId = activeSessionId
+            if (!sessionId || sending) return
+            setError('')
+            appendMessage(sessionId, { role: 'user', content: text.trim() })
+            appendMessage(sessionId, {
+                role: 'assistant',
+                content: '',
+                pending: true,
+                kind: 'decision',
+                progress: ['小墨鱼团队启动中…'],
+            })
+            setSending(true)
+            isNearBottomRef.current = true
+
+            const requestId = `dec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            const offProgress = window.api.ai.onAgentProgress((data) => {
+                if (data.requestId !== requestId) return
+                updatePendingMessage(sessionId, (m) => ({
+                    ...m,
+                    progress: [...(m.progress ?? []), data.label],
+                }))
+            })
+
+            ;(async () => {
+                try {
+                    const profile = await window.api.memory.getInvestorProfile().catch(() => null)
+                    const capital = profile?.capital ?? 5000
+                    const riskLevel = profile?.riskLevel || '平衡'
+                    const today = new Date().toISOString().slice(0, 10)
+                    // 若用户在消息里写了 6 位股票代码，直接用它们当候选池（盘后/领涨榜为空时的手动兜底）
+                    const manualCodes = Array.from(
+                        new Set((text.match(/\b\d{6}\b/g) ?? []))
+                    ).map((code) => ({ code, name: code }))
+                    const result = await window.api.ai.agentDecision({
+                        date: today,
+                        candidateCodes: manualCodes,
+                        capital,
+                        riskLevel,
+                        requestId,
+                    })
+                    finalizePendingMessage(sessionId, (m) => ({
+                        ...m,
+                        role: 'assistant',
+                        pending: false,
+                        kind: 'decision',
+                        content: result.structuredDecision?.summary || '已生成今日计划',
+                        decision: {
+                            decision: result.decision,
+                            marketContext: result.marketContext,
+                            structuredDecision: result.structuredDecision,
+                            marketRegime: result.marketRegime,
+                            diagnostics: result.diagnostics,
+                        },
+                    }))
+                } catch (e) {
+                    finalizePendingMessage(sessionId, (m) => ({
+                        ...m,
+                        pending: false,
+                        kind: undefined,
+                        content: `生成今日计划失败：${e instanceof Error ? e.message : String(e)}`,
+                    }))
+                } finally {
+                    offProgress()
+                    setSending(false)
+                    inputRef.current?.focus()
+                }
+            })()
+        },
+        [activeSessionId, sending, appendMessage, updatePendingMessage, finalizePendingMessage]
+    )
+
     function handleSend(text?: string) {
         const content = (text ?? input).trim()
         if (!content && selectedImages.length === 0) return
+        // 命中「生成今日计划」意图（且未附带图片）时走决策 Agent，渲染成卡片
+        if (selectedImages.length === 0 && isDecisionIntent(content)) {
+            setInput('')
+            runDecision(content)
+            return
+        }
         setInput('')
         const images = selectedImages.length > 0 ? [...selectedImages] : undefined
         setSelectedImages([])
@@ -458,9 +629,15 @@ export default function AIChat() {
 
     async function handleFeedback(content: string, type: 'positive' | 'negative') {
         try {
-            // 简单的反馈收集
-            console.log('Feedback:', type, content)
-            // 可以扩展为发送到后端或本地存储
+            // 反馈落地到 localStorage，供后续统计/改进使用（避免仅 console.log 丢失）
+            const KEY = 'chat_feedback'
+            const raw = localStorage.getItem(KEY)
+            const list: Array<{ type: string; content: string; at: number }> = raw
+                ? JSON.parse(raw)
+                : []
+            list.push({ type, content: content.slice(0, 500), at: Date.now() })
+            // 只保留最近 200 条，避免无限增长
+            localStorage.setItem(KEY, JSON.stringify(list.slice(-200)))
             setToastMessage(type === 'positive' ? '感谢反馈！' : '收到，我们会改进')
             window.setTimeout(() => setToastMessage(null), 2000)
         } catch {
@@ -473,16 +650,54 @@ export default function AIChat() {
         if (failed) doSend(failed.content, failed.images)
     }
 
+    const aiTabs = (
+        <div className="ai-tabs">
+            <button
+                className={`ai-tab ${aiTab === 'chat' ? 'active' : ''}`}
+                onClick={() => switchTab('chat')}
+            >
+                💬 对话
+            </button>
+            <button
+                className={`ai-tab ${aiTab === 'plan' ? 'active' : ''}`}
+                onClick={() => switchTab('plan')}
+            >
+                📊 我的决策 & 战绩
+            </button>
+        </div>
+    )
+
+    // 我的决策标签：决策记忆 & 命中追踪（战绩管理）
+    if (aiTab === 'plan') {
+        return (
+            <div className="chat-layout">
+                <div className="chat-page">
+                    {aiTabs}
+                    <DecisionHistory />
+                </div>
+            </div>
+        )
+    }
+
     return (
         <div className="chat-layout">
             <ChatSidebar />
             <div className="chat-page">
+                {aiTabs}
                 <div className="page-header">
                     <div>
-                        <h1 className="page-title">AI 炒股助手</h1>
+                        <h1 className="page-title">小墨鱼 🦑</h1>
                         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                            可以询问个股分析、板块逻辑、技术指标、操作策略等问题
+                            你的 A 股投研 Agent — 会自己调取行情、K线、基本面和你的持仓来分析，而不只是聊天
                         </p>
+                        <button
+                            className="btn-small"
+                            style={{ marginTop: 6 }}
+                            onClick={() => runDecision('生成今日计划')}
+                            disabled={sending || !activeSessionId}
+                        >
+                            📅 生成今日计划
+                        </button>
                     </div>
                 </div>
 
@@ -495,8 +710,8 @@ export default function AIChat() {
                 >
                     {activeSessionId && messages.length === 0 && (
                         <div className="chat-welcome">
-                            <div className="chat-welcome-title">你好，我是 AI 炒股助手</div>
-                            <p>你可以问我任何关于 A 股的问题，例如：</p>
+                            <div className="chat-welcome-title">你好，我是小墨鱼 🦑</div>
+                            <p>我是能自己动手查数据的投研 Agent，你可以问我任何关于 A 股的问题，例如：</p>
                             <div className="chat-suggestions">
                                 {SUGGESTIONS.map((s, i) => (
                                     <button
@@ -519,6 +734,7 @@ export default function AIChat() {
                             onRegenerate={handleRegenerate}
                             onFeedback={handleFeedback}
                             analyzingMessage={i === messages.length - 1 && msg.role === 'assistant' && msg.pending ? analyzingMessage : null}
+                            onOpenFull={() => switchTab('plan')}
                         />
                     ))}
                     {error && (

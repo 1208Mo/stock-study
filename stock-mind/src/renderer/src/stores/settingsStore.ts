@@ -7,14 +7,23 @@ interface SettingsState {
     apiKeys: Record<AIProvider, string>
     aiModels: Record<AIProvider, string>
     aiBaseUrls: Record<AIProvider, string>
-    alertThreshold: number // percent, default 5
+    // 自定义中转（OpenAI 兼容），开启后全局忽略上面的 provider 选择
+    useCustomAI: boolean
+    customBaseUrl: string
+    customModel: string
+    customKey: string
     loaded: boolean
     loadSettings: () => Promise<void>
     saveAIProvider: (provider: AIProvider) => Promise<void>
     saveAPIKey: (provider: AIProvider, key: string) => Promise<void>
     saveAIModel: (provider: AIProvider, model: string) => Promise<void>
     saveAIBaseUrl: (provider: AIProvider, baseUrl: string) => Promise<void>
-    saveAlertThreshold: (threshold: number) => Promise<void>
+    saveCustomAI: (cfg: {
+        enabled: boolean
+        baseUrl: string
+        model: string
+        key: string
+    }) => Promise<void>
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -22,13 +31,15 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     apiKeys: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '', zhipu: '' },
     aiModels: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '', zhipu: '' },
     aiBaseUrls: { openai: '', deepseek: '', qwen: '', ernie: '', volcengine: '', zhipu: '' },
-    alertThreshold: 5,
+    useCustomAI: false,
+    customBaseUrl: '',
+    customModel: '',
+    customKey: '',
     loaded: false,
 
     loadSettings: async () => {
         try {
             const provider = (await window.api.settings.get('ai_provider')) as AIProvider | null
-            const threshold = await window.api.settings.get('alert_threshold')
 
             const keys: Record<AIProvider, string> = {
                 openai: '',
@@ -65,7 +76,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
                 apiKeys: keys,
                 aiModels: models,
                 aiBaseUrls: baseUrls,
-                alertThreshold: threshold ? parseInt(threshold) : 5,
+                useCustomAI: (await window.api.settings.get('ai_use_custom')) === '1',
+                customBaseUrl: (await window.api.settings.get('ai_custom_base_url')) ?? '',
+                customModel: (await window.api.settings.get('ai_custom_model')) ?? '',
+                customKey: (await window.api.settings.get('ai_custom_key')) ?? '',
                 loaded: true,
             })
         } catch (e) {
@@ -94,8 +108,16 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         set((s) => ({ aiBaseUrls: { ...s.aiBaseUrls, [provider]: baseUrl } }))
     },
 
-    saveAlertThreshold: async (threshold) => {
-        await window.api.settings.set('alert_threshold', String(threshold))
-        set({ alertThreshold: threshold })
+    saveCustomAI: async ({ enabled, baseUrl, model, key }) => {
+        await window.api.settings.set('ai_use_custom', enabled ? '1' : '0')
+        await window.api.settings.set('ai_custom_base_url', baseUrl)
+        await window.api.settings.set('ai_custom_model', model)
+        await window.api.settings.set('ai_custom_key', key)
+        set({
+            useCustomAI: enabled,
+            customBaseUrl: baseUrl,
+            customModel: model,
+            customKey: key,
+        })
     },
 }))

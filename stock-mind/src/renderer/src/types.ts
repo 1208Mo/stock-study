@@ -149,6 +149,14 @@ export interface AgentDiagnostics {
     workflowNotes: string[]
     quoteCount: number
     filteredQuoteCount: number
+    // 多智能体产物：多头论据、空头论据、风控官裁决
+    bullResearch?: string
+    bearResearch?: string
+    riskVerdicts?: string[]
+    // 分析师层报告：技术面 / 基本面 / 消息面
+    technicalAnalysis?: string
+    fundamentalAnalysis?: string
+    newsAnalysis?: string
 }
 
 // ===== 市场状态判断（marketRegime）=====
@@ -424,6 +432,7 @@ declare global {
                     candidateCodes: Array<{ code: string; name: string }>
                     capital?: number
                     riskLevel?: string
+                    requestId?: string
                 }) => Promise<{
                     marketContext: string
                     decision: string
@@ -433,6 +442,9 @@ declare global {
                     marketRegime: MarketRegime | null
                     savedDecisionId?: number
                 }>
+                onAgentProgress: (
+                    cb: (data: { requestId: string; node: string; label: string }) => void
+                ) => () => void
                 chat: (payload: {
                     messages: Array<{ role: string; content: string }>
                 }) => Promise<{

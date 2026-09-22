@@ -163,12 +163,28 @@ const api = {
                 reasons: string[]
             }>
         }) => ipcRenderer.invoke('ai:marketContext', payload),
+        // 截图识别股票（持仓/自选批量导入）
+        extractStocksFromImage: (payload: {
+            images: Array<{ id: string; dataUrl: string; name: string; type: string }>
+        }): Promise<Array<{ code: string; name: string; costPrice?: number; quantity?: number }>> =>
+            ipcRenderer.invoke('ai:extractStocksFromImage', payload),
         agentDecision: (payload: {
             date: string
             candidateCodes: Array<{ code: string; name: string }>
             capital?: number
             riskLevel?: string
+            requestId?: string
         }) => ipcRenderer.invoke('ai:agentDecision', payload),
+        onAgentProgress: (
+            cb: (data: { requestId: string; node: string; label: string }) => void
+        ): (() => void) => {
+            const handler = (
+                _e: Electron.IpcRendererEvent,
+                data: { requestId: string; node: string; label: string }
+            ) => cb(data)
+            ipcRenderer.on('ai:agentDecision:progress', handler)
+            return () => ipcRenderer.removeListener('ai:agentDecision:progress', handler)
+        },
         chat: (payload: { messages: Array<{ role: string; content: string }> }) =>
             ipcRenderer.invoke('ai:chat', payload),
         // 流式对话（Step 4：以 sessionId 为 thread_id，历史由 checkpointer 管理）

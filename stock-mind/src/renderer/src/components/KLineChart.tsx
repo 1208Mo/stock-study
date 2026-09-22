@@ -1,5 +1,6 @@
 import ReactECharts from 'echarts-for-react'
 import type { KLineData } from '../types'
+import { useChartTheme } from '../utils/chartTheme'
 
 interface Props {
     data: KLineData[]
@@ -65,6 +66,7 @@ function calcMACD(closes: number[]): {
 }
 
 export default function KLineChart({ data, title }: Props) {
+    const theme = useChartTheme()
     if (data.length === 0) {
         return null
     }
@@ -73,8 +75,8 @@ export default function KLineChart({ data, title }: Props) {
     const values = data.map((d) => [d.open, d.close, d.low, d.high])
     const volumes = data.map((d) => d.volume)
     const closes = data.map((d) => d.close)
-    const upColor = '#ef5350'
-    const downColor = '#26a69a'
+    const upColor = theme.up
+    const downColor = theme.down
 
     const maColors: Record<number, string> = {
         5: '#facc15',
@@ -96,7 +98,7 @@ export default function KLineChart({ data, title }: Props) {
     const { dif, dea, bar } = calcMACD(closes)
 
     const option = {
-        title: title ? { text: title, left: 'center', textStyle: { fontSize: 14 } } : undefined,
+        title: title ? { text: title, left: 'center', textStyle: { fontSize: 14, color: theme.text } } : undefined,
         tooltip: {
             trigger: 'axis',
             axisPointer: { type: 'cross' },
@@ -116,7 +118,7 @@ export default function KLineChart({ data, title }: Props) {
         legend: {
             data: ['K线', 'MA5', 'MA10', 'MA20', 'MA30', '成交量', 'DIF', 'DEA', 'MACD'],
             bottom: 4,
-            textStyle: { fontSize: 11 },
+            textStyle: { fontSize: 11, color: theme.axis },
         },
         grid: [
             { left: '10%', right: '4%', top: '6%', height: '38%' }, // K线

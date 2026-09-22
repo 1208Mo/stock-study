@@ -1,11 +1,11 @@
 import { lazy, Suspense, useEffect } from 'react'
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
+import ErrorBoundary from './components/ErrorBoundary'
 
 const Portfolio = lazy(() => import('./pages/Portfolio'))
 const StockDetail = lazy(() => import('./pages/StockDetail'))
 const Watchlist = lazy(() => import('./pages/Watchlist'))
 const Settings = lazy(() => import('./pages/Settings'))
-const DailyDecision = lazy(() => import('./pages/DailyDecision'))
 const RealtimeChart = lazy(() => import('./pages/RealtimeChart'))
 const AIChat = lazy(() => import('./pages/AIChat'))
 const SectorRadar = lazy(() => import('./pages/SectorRadar'))
@@ -42,14 +42,6 @@ export default function App() {
                             观察列表
                         </NavLink>
                         <NavLink
-                            to="/decision"
-                            className={({ isActive }) =>
-                                isActive ? 'nav-item active' : 'nav-item'
-                            }
-                        >
-                            每日决策
-                        </NavLink>
-                        <NavLink
                             to="/radar"
                             className={({ isActive }) =>
                                 isActive ? 'nav-item active' : 'nav-item'
@@ -59,11 +51,12 @@ export default function App() {
                         </NavLink>
                         <NavLink
                             to="/chat"
+                            title="AI 投研助手：对话问答 + 每日计划 + 战绩追踪"
                             className={({ isActive }) =>
                                 isActive ? 'nav-item active' : 'nav-item'
                             }
                         >
-                            AI 对话
+                            小墨鱼 AI
                         </NavLink>
                         <NavLink
                             to="/settings"
@@ -79,18 +72,19 @@ export default function App() {
                     </div>
                 </aside>
                 <main className="main-content">
-                    <Suspense fallback={<div className="loading-state">加载中...</div>}>
-                        <Routes>
+                    <ErrorBoundary>
+                        <Suspense fallback={<div className="loading-state">加载中...</div>}>
+                            <Routes>
                             <Route path="/" element={<Portfolio />} />
                             <Route path="/stock/:code" element={<StockDetail />} />
                             <Route path="/realtime/:code" element={<RealtimeChart />} />
                             <Route path="/watchlist" element={<Watchlist />} />
-                            <Route path="/decision" element={<DailyDecision />} />
                             <Route path="/radar" element={<SectorRadar />} />
                             <Route path="/chat" element={<AIChat />} />
                             <Route path="/settings" element={<Settings />} />
                         </Routes>
                     </Suspense>
+                    </ErrorBoundary>
                 </main>
             </div>
         </HashRouter>

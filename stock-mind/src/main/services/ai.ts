@@ -1,3 +1,5 @@
+import { PROVIDER_DEFAULTS } from './constants'
+
 export type AIProvider = 'openai' | 'deepseek' | 'qwen' | 'ernie' | 'volcengine' | 'zhipu'
 
 export interface AIMessage {
@@ -47,15 +49,6 @@ function formatAIError(
     return new Error(`AI 调用失败：${provider} / ${model}，接口 ${baseUrl}。${String(error)}`)
 }
 
-const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> = {
-    openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-    deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-    qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
-    ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
-    volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
-    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2' },
-}
-
 async function callOpenAICompatible(
     provider: AIProvider,
     baseUrl: string,
@@ -96,31 +89,6 @@ export async function callAI(
     const content = await callOpenAICompatible(provider, baseUrl, config.apiKey, model, messages)
 
     return { content, model, provider }
-}
-
-export function buildChatSystemPrompt(): AIMessage {
-    return {
-        role: 'system',
-        content: `你是一个A股投资入门助手，服务对象是零基础新手投资者。
-
-你的职责：
-1. 可以直接给出具体的A股代码和参考价位，但必须同时解释清楚"为什么"，让新手看懂。
-2. 优先推荐风险相对较低的品种：沪深主板蓝筹股（60xxxx / 00xxxx）、宽基ETF（如510300沪深300ETF、510500中证500ETF）。
-3. 给出买入参考价、止损价、目标价，并用大白话解释每个价位的含义。
-4. 遇到专业名词（如MACD、均线、量比等），主动用一两句话解释清楚。
-5. 主动提示风险：仓位不能押太重、不要追涨杀跌、止损要执行。
-
-【标的选择偏好】
-- 优先：沪市主板60xxxx、深市主板00xxxx、宽基ETF（510开头）
-- 避免推荐：创业板300、科创板688、北交所，这些波动大、不适合新手
-- 个股优先选：行业龙头、业绩稳定、市值大、流动性好的
-
-【回答风格】
-- 直接给代码，不绕弯子
-- 用中文口语，不堆砌金融术语
-- 每次推荐加一句"新手注意"提示操作要点
-- 免责声明只在第一轮带一次：以上为研究参考，不构成投资建议，亏损风险自担。`,
-    }
 }
 
 export function buildStockAnalysisPrompt(

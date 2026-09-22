@@ -15,6 +15,8 @@ const THEMES: { id: string; label: string; sidebar: string; main: string; primar
 function applyTheme(themeId: string) {
     document.documentElement.setAttribute('data-theme', themeId)
     localStorage.setItem('theme', themeId)
+    // 通知图表即时重新上色
+    window.dispatchEvent(new Event('themechange'))
 }
 
 const PROVIDERS: {
@@ -84,14 +86,17 @@ export default function Settings() {
         apiKeys,
         aiModels,
         aiBaseUrls,
-        alertThreshold,
+        useCustomAI,
+        customBaseUrl,
+        customModel,
+        customKey,
         loaded,
         loadSettings,
         saveAIProvider,
         saveAPIKey,
         saveAIModel,
         saveAIBaseUrl,
-        saveAlertThreshold,
+        saveCustomAI,
     } = useSettingsStore()
 
     const [localProvider, setLocalProvider] = useState<AIProvider>(aiProvider)
@@ -120,7 +125,11 @@ export default function Settings() {
         volcengine: '',
         zhipu: '',
     })
-    const [localThreshold, setLocalThreshold] = useState(5)
+    const [localUseCustom, setLocalUseCustom] = useState(false)
+    const [localCustomBaseUrl, setLocalCustomBaseUrl] = useState('')
+    const [localCustomModel, setLocalCustomModel] = useState('')
+    const [localCustomKey, setLocalCustomKey] = useState('')
+    const [showCustomKey, setShowCustomKey] = useState(false)
     const [currentTheme, setCurrentTheme] = useState(() => localStorage.getItem('theme') || 'dark')
     const [showKey, setShowKey] = useState<Record<AIProvider, boolean>>({
         openai: false,
@@ -145,8 +154,11 @@ export default function Settings() {
         setLocalKeys(apiKeys)
         setLocalModels(aiModels)
         setLocalBaseUrls(aiBaseUrls)
-        setLocalThreshold(alertThreshold)
-    }, [aiProvider, apiKeys, aiModels, aiBaseUrls, alertThreshold])
+        setLocalUseCustom(useCustomAI)
+        setLocalCustomBaseUrl(customBaseUrl)
+        setLocalCustomModel(customModel)
+        setLocalCustomKey(customKey)
+    }, [aiProvider, apiKeys, aiModels, aiBaseUrls, useCustomAI, customBaseUrl, customModel, customKey])
 
     // 仅在初始加载完成时设置展开状态，后续不强制重置，保持用户当前的展开选择
     // 这样编辑非当前选中的模型时，卡片不会被自动折叠
@@ -231,15 +243,36 @@ export default function Settings() {
     useEffect(() => {
         if (!loaded) return
         const debounce = setTimeout(async () => {
-            const threshold = Math.max(1, Math.min(20, localThreshold || 5))
-            if (threshold !== alertThreshold) {
+            if (
+                localUseCustom !== useCustomAI ||
+                localCustomBaseUrl !== customBaseUrl ||
+                localCustomModel !== customModel ||
+                localCustomKey !== customKey
+            ) {
                 setSaveStatus('saving')
-                await saveAlertThreshold(threshold)
-                showSaveFeedback('提醒阈值已保存')
+                await saveCustomAI({
+                    enabled: localUseCustom,
+                    baseUrl: localCustomBaseUrl,
+                    model: localCustomModel,
+                    key: localCustomKey,
+                })
+                showSaveFeedback('自定义中转已保存')
             }
         }, 500)
         return () => clearTimeout(debounce)
-    }, [localThreshold, alertThreshold, loaded, saveAlertThreshold, showSaveFeedback])
+    }, [
+        localUseCustom,
+        localCustomBaseUrl,
+        localCustomModel,
+        localCustomKey,
+        useCustomAI,
+        customBaseUrl,
+        customModel,
+        customKey,
+        loaded,
+        saveCustomAI,
+        showSaveFeedback,
+    ])
 
     useEffect(() => {
         const debounce = setTimeout(async () => {
@@ -327,8 +360,78 @@ export default function Settings() {
                     点击卡片切换模型，点击已选中的卡片展开/收起配置。Key 仅存储在本地。
                 </p>
 
-                {/* 网格选择区 */}
-                <div className="provider-grid-select">
+                {/* 自定义中转（OpenAI 兼容）：开启后全局忽略下方供应商选择 */}
+                <div className="provider-config-panel" style={{ marginBottom: 12 }}>
+                    <div className="provider-config-panel-header">
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                            <input
+                                type="checkbox"
+                                checked={localUseCustom}
+                                onChange={(e) => setLocalUseCustom(e.target.checked)}
+                            />
+                            <span>使用自定义中转（OpenAI 兼容）</span>
+                        </label>
+                    </div>
+                    <p className="settings-note">
+                        开启后将忽略下方供应商选择，全局使用此中转。也可用环境变量
+                        AI_API_KEY / AI_BASE_URL / AI_MODEL 覆盖（优先级最高）。
+                    </p>
+                    {localUseCustom && (
+                        <div className="provider-config-panel-fields">
+                            <div className="provider-field-row">
+                                <label>接口地址</label>
+                                <input
+                                    className="input"
+                                    placeholder="https://oneapi-comate.baidu-int.com/v1"
+                                    value={localCustomBaseUrl}
+                                    onChange={(e) => setLocalCustomBaseUrl(e.target.value)}
+                                />
+                            </div>
+                            <div className="provider-field-row">
+                                <label>模型名</label>
+                                <input
+                                    className="input"
+                                    placeholder="gpt-5.6-sol"
+                                    value={localCustomModel}
+                                    onChange={(e) => setLocalCustomModel(e.target.value)}
+                                />
+                            </div>
+                            <div className="provider-field-row">
+                                <label>API Key</label>
+                                <div className="input-with-toggle">
+                                    <input
+                                        className="input"
+                                        type={showCustomKey ? 'text' : 'password'}
+                                        placeholder="sk-..."
+                                        value={localCustomKey}
+                                        onChange={(e) => setLocalCustomKey(e.target.value)}
+                                    />
+                                    <button
+                                        className="btn-toggle-key"
+                                        onClick={() => setShowCustomKey(!showCustomKey)}
+                                    >
+                                        {showCustomKey ? '隐藏' : '显示'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* 网格选择区（开启自定义中转后，下方供应商选择不生效，弱化展示） */}
+                {localUseCustom && (
+                    <p className="settings-note" style={{ color: 'var(--up)' }}>
+                        已启用「自定义中转」，下方供应商选择暂不生效。关闭上方开关后可继续使用。
+                    </p>
+                )}
+                <div
+                    className="provider-grid-select"
+                    style={
+                        localUseCustom
+                            ? { opacity: 0.45, pointerEvents: 'none', filter: 'grayscale(0.5)' }
+                            : undefined
+                    }
+                >
                     {PROVIDERS.map((p) => {
                         const isActive = localProvider === p.id
                         const hasKey = localKeys[p.id].trim().length > 0
@@ -368,7 +471,7 @@ export default function Settings() {
                 </div>
 
                 {/* 展开的配置面板 */}
-                {expandedProvider && PROVIDERS.find((p) => p.id === expandedProvider) && (
+                {!localUseCustom && expandedProvider && PROVIDERS.find((p) => p.id === expandedProvider) && (
                     <div className="provider-config-panel">
                         <div className="provider-config-panel-header">
                             <span>
@@ -447,27 +550,6 @@ export default function Settings() {
                         </div>
                     </div>
                 )}
-            </section>
-
-            {/* 异动提醒阈值 */}
-            <section className="settings-section">
-                <h2>异动提醒阈值</h2>
-                <div className="threshold-row">
-                    <label className="label">涨跌幅超过</label>
-                    <input
-                        className="input input-small"
-                        type="number"
-                        min={1}
-                        max={20}
-                        value={localThreshold}
-                        onChange={(e) =>
-                            setLocalThreshold(
-                                Math.max(1, Math.min(20, Number(e.target.value) || 5))
-                            )
-                        }
-                    />
-                    <span>% 时通知</span>
-                </div>
             </section>
 
             {/* 长期投资记忆 */}

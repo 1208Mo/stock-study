@@ -8,7 +8,24 @@
  *   chat_sessions（元数据）+ chat_messages（UI 展示消息）+ chat_checkpoints/writes（Agent 状态）
  */
 import { create } from 'zustand'
-import type { ChatSessionMeta, ChatMessageRow, ResearchToolTrace, ImageContent } from '../types'
+import type {
+    ChatSessionMeta,
+    ChatMessageRow,
+    ResearchToolTrace,
+    ImageContent,
+    StructuredDecision,
+    MarketRegime,
+    AgentDiagnostics,
+} from '../types'
+
+// 对话内「今日计划」卡片承载的决策结果（由决策 Agent 生成，渲染为聊天卡片）
+export interface ChatDecisionResult {
+    decision: string
+    marketContext: string
+    structuredDecision: StructuredDecision | null
+    marketRegime: MarketRegime | null
+    diagnostics?: AgentDiagnostics
+}
 
 export interface ChatMessage {
     role: 'user' | 'assistant'
@@ -17,6 +34,11 @@ export interface ChatMessage {
     stopped?: boolean
     toolCalls?: ResearchToolTrace[]
     images?: ImageContent[]
+    // 决策卡片：kind==='decision' 时，用 DecisionCard 渲染而非普通文本
+    kind?: 'decision'
+    decision?: ChatDecisionResult
+    // 决策 Agent 生成过程中的进度步骤（pending 时展示）
+    progress?: string[]
 }
 
 interface ChatSessionsState {

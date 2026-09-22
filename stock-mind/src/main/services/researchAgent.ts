@@ -11,7 +11,6 @@
  */
 
 import { z } from 'zod'
-import { ChatOpenAI } from '@langchain/openai'
 import { tool } from '@langchain/core/tools'
 import {
     HumanMessage,
@@ -27,19 +26,12 @@ import type { BaseMessage } from '@langchain/core/messages'
 import { REMOVE_ALL_MESSAGES } from '@langchain/langgraph'
 import { createReactAgent } from '@langchain/langgraph/prebuilt'
 import type { AIProvider } from './ai'
+import { createChatModel } from './llm'
+import { PROVIDER_DEFAULTS } from './constants'
 import { fetchQuote, fetchKLine, fetchSectorInfo, fetchDividends, searchStock, fetchBatchQuotes } from './market'
 import { fetchFundamentals } from './fundamentals'
 import { getAllHoldings, listChatMessages } from '../db'
 import { getChatCheckpointer } from './chatCheckpointer'
-
-const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; model: string }> = {
-    openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-    deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-    qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo' },
-    ernie: { baseUrl: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-8k-preview' },
-    volcengine: { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: '' },
-    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2' },
-}
 
 // 支持视觉（图片输入）的模型关键词
 const VISION_MODEL_KEYWORDS = [
@@ -168,6 +160,101 @@ export interface ImageContent {
     type: string
 }
 
+export interface ExtractedStock {
+    code: string
+    name: string
+    costPrice?: number
+    quantity?: number
+}
+
+// 从模型返回文本里健壮地解析出股票数组（容忍 ```json 代码块围栏与多余文字）
+function parseExtractedStocks(raw: string): ExtractedStock[] {
+    if (!raw) return []
+    let text = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
+    const start = text.indexOf('[')
+    const end = text.lastIndexOf(']')
+    if (start !== -1 && end !== -1 && end > start) {
+        text = text.slice(start, end + 1)
+    }
+    let arr: unknown
+    try {
+        arr = JSON.parse(text)
+    } catch {
+        return []
+    }
+    if (!Array.isArray(arr)) return []
+    const seen = new Set<string>()
+    const result: ExtractedStock[] = []
+    for (const item of arr) {
+        if (!item || typeof item !== 'object') continue
+        const obj = item as Record<string, unknown>
+        const codeMatch = String(obj.code ?? '').match(/\d{6}/)
+        if (!codeMatch) continue
+        const code = codeMatch[0]
+        if (seen.has(code)) continue
+        seen.add(code)
+        const name = typeof obj.name === 'string' ? obj.name.trim() : ''
+        const costPrice =
+            typeof obj.costPrice === 'number' && isFinite(obj.costPrice) ? obj.costPrice : undefined
+        const quantity =
+            typeof obj.quantity === 'number' && isFinite(obj.quantity) ? obj.quantity : undefined
+        result.push({ code, name: name || code, costPrice, quantity })
+    }
+    return result
+}
+
+/**
+ * 用视觉模型从持仓/自选截图中提取股票列表，返回结构化数组。
+ * 供「持仓管理」「观察列表」的截图导入使用。
+ */
+export async function extractStocksFromImage(
+    provider: AIProvider,
+    apiKey: string,
+    baseUrl: string | undefined,
+    images: ImageContent[],
+    model?: string,
+    abortSignal?: AbortSignal
+): Promise<ExtractedStock[]> {
+    if (!images || images.length === 0) return []
+    // 配置的模型本身支持视觉就直接用，否则回退到该供应商推荐的视觉模型
+    const visionModel = model && modelSupportsVision(model) ? model : getAutoVisionModel(provider)
+    if (!visionModel) {
+        throw new Error(
+            '当前模型不支持识图，请在设置中切换到支持视觉的模型（如 gpt-4o、qwen-vl-max、glm-4v 等）'
+        )
+    }
+
+    const llm = createLLM(provider, apiKey, baseUrl, visionModel)
+
+    const systemPrompt = `你是一个股票持仓截图识别助手。用户会上传券商App或表格的持仓/自选截图。
+请从图片中提取每一只股票，输出严格的 JSON 数组，不要任何多余文字、不要 markdown 代码块。
+每个元素字段：
+- code: 6位股票代码（字符串，必填；识别不到就跳过该条）
+- name: 股票名称（字符串，识别不到填空字符串）
+- costPrice: 成本价（数字，识别不到则省略该字段）
+- quantity: 持仓数量/股数（数字，识别不到则省略该字段）
+只返回 JSON 数组本身，例如：[{"code":"600519","name":"贵州茅台","costPrice":1680.5,"quantity":100}]
+如果图中没有任何股票，返回 []`
+
+    const messageContent: Array<
+        { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
+    > = [{ type: 'text', text: '请识别下列图片中的股票并按要求输出 JSON 数组：' }]
+    for (const img of images) {
+        messageContent.push({ type: 'image_url', image_url: { url: img.dataUrl } })
+    }
+
+    const response = await llm.invoke(
+        [new SystemMessage(systemPrompt), new HumanMessage({ content: messageContent })],
+        abortSignal ? { signal: abortSignal } : {}
+    )
+    const raw =
+        typeof response.content === 'string'
+            ? response.content
+            : contentToText(response.content)
+    return parseExtractedStocks(raw)
+}
+
+
 export interface ResearchAgentInput {
     provider: AIProvider
     apiKey: string
@@ -198,19 +285,9 @@ export interface ResearchAgentOutput {
     aborted?: boolean
 }
 
+// 复用共享工厂（见 llm.ts）；研究对话场景用 temperature 0.4（更稳定）
 function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model?: string) {
-    const defaults = PROVIDER_DEFAULTS[provider]
-    let finalBaseUrl = baseUrl || defaults.baseUrl
-    finalBaseUrl = finalBaseUrl.replace(/\/chat\/completions\/?$/, '')
-    return new ChatOpenAI({
-        apiKey,
-        model: model || defaults.model,
-        temperature: 0.4,
-        maxTokens: 16384,
-        configuration: {
-            baseURL: finalBaseUrl,
-        },
-    })
+    return createChatModel(provider, apiKey, baseUrl, model, 0.4)
 }
 
 function compactJson(value: unknown): string {

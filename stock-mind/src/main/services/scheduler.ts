@@ -76,6 +76,7 @@ async function checkAbnormalMovement(): Promise<void> {
 
         for (const q of quotes) {
             const absChange = Math.abs(q.changePercent)
+            // 异动阈值固定 5%（此前的可配置设置项未接线、已移除）
             if (absChange >= 5) {
                 const direction = q.changePercent > 0 ? '上涨' : '下跌'
                 const notification = new Notification({

@@ -261,7 +261,7 @@ export default function Portfolio() {
                 key={h.id}
                 className={`portfolio-row ${isUp ? 'up' : 'down'}`}
                 onClick={() =>
-                    navigate(`/realtime/${h.code}?name=${encodeURIComponent(h.name)}`)
+                    navigate(`/stock/${h.code}?name=${encodeURIComponent(h.name)}`)
                 }
             >
                 <div className="col-name">

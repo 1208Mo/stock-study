@@ -67,6 +67,8 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
     const [batchImporting, setBatchImporting] = useState(false)
     const [batchResult, setBatchResult] = useState('')
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const [imageAnalyzing, setImageAnalyzing] = useState(false)
+    const [imageMsg, setImageMsg] = useState('')
 
     async function handleSearchCode() {
         const keyword = code.trim()
@@ -214,6 +216,56 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
         setBatchResult('')
     }
 
+    function fileToDataUrl(file: File): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result as string)
+            reader.onerror = reject
+            reader.readAsDataURL(file)
+        })
+    }
+
+    // 截图识别导入：把图片交给多模态模型，识别结果回填到文本框（复用文本解析预览流程）
+    async function handleImagePick(e: React.ChangeEvent<HTMLInputElement>) {
+        const files = e.target.files
+        if (!files || files.length === 0) return
+        setImageAnalyzing(true)
+        setImageMsg('')
+        try {
+            const images: Array<{ id: string; dataUrl: string; name: string; type: string }> = []
+            for (const file of Array.from(files)) {
+                if (!file.type.startsWith('image/')) continue
+                const dataUrl = await fileToDataUrl(file)
+                images.push({
+                    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                    dataUrl,
+                    name: file.name || '截图',
+                    type: file.type,
+                })
+            }
+            if (images.length === 0) return
+            const stocks = await window.api.ai.extractStocksFromImage({ images })
+            if (stocks.length === 0) {
+                setImageMsg('未从截图中识别到股票，可改用手动粘贴文字')
+            } else {
+                const lines = stocks
+                    .map((s) =>
+                        [s.code, s.name, s.costPrice ?? '', s.quantity ?? '']
+                            .filter((x) => x !== '' && x !== undefined)
+                            .join(' ')
+                    )
+                    .join('\n')
+                handleBatchTextChange((batchText ? batchText + '\n' : '') + lines)
+                setImageMsg(`已识别 ${stocks.length} 只股票，请核对后点击导入`)
+            }
+        } catch (err) {
+            setImageMsg(err instanceof Error ? err.message : '识图失败')
+        } finally {
+            setImageAnalyzing(false)
+            e.target.value = ''
+        }
+    }
+
     async function handleBatchImport() {
         if (batchParsed.length === 0) return
         setBatchImporting(true)
@@ -354,11 +406,31 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                 ) : batchMode ? (
                     <div className="modal-body">
                         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-                            将截图中的持仓文字粘贴到下方，或直接输入股票代码（每行一个）。
+                            上传持仓截图让 AI 自动识别，或将截图文字粘贴到下方 / 直接输入代码（每行一个）。
                             <br />
                             格式支持：<code>600519 贵州茅台 1750.00 100</code> 或仅{' '}
                             <code>600519</code>
                         </p>
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                            <button
+                                className="btn-secondary"
+                                onClick={() => fileInputRef.current?.click()}
+                                disabled={imageAnalyzing}
+                            >
+                                {imageAnalyzing ? '识别中...' : '📷 上传截图识别'}
+                            </button>
+                            {imageMsg && (
+                                <span
+                                    style={{
+                                        fontSize: 12,
+                                        color: 'var(--text-muted)',
+                                        alignSelf: 'center',
+                                    }}
+                                >
+                                    {imageMsg}
+                                </span>
+                            )}
+                        </div>
                         <textarea
                             className="input"
                             rows={8}
@@ -376,7 +448,9 @@ export default function AddHoldingModal({ onClose, editingHolding, tradingHoldin
                             ref={fileInputRef}
                             type="file"
                             accept="image/*"
+                            multiple
                             style={{ display: 'none' }}
+                            onChange={handleImagePick}
                         />
                         {batchParsed.length > 0 && (
                             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>

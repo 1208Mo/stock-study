@@ -277,7 +277,7 @@ const Pet: React.FC = () => {
     // 兼容：主进程推送的状态
     useEffect(() => {
         const handleNavigate = (): void => {
-            showBubble('正在打开 AI 对话...')
+            showBubble('正在打开小墨鱼...')
         }
         const handleStateUpdate = (
             _e: unknown,

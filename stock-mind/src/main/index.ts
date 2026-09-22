@@ -14,7 +14,8 @@ if (process.platform === 'win32') {
 
 let mainWindow: BrowserWindow | null = null
 let petWindow: BrowserWindow | null = null
-let petEnabled = true
+// 桌宠默认隐藏，可通过 pet:show IPC 重新开启
+let petEnabled = false
 
 function createWindow(): void {
     if (mainWindow && !mainWindow.isDestroyed()) return

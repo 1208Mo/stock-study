@@ -296,6 +296,15 @@ export default function StockDetail() {
                         </div>
                     )}
                 </div>
+                <button
+                    className="btn-secondary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    onClick={() =>
+                        navigate(`/realtime/${code}?name=${encodeURIComponent(name)}`)
+                    }
+                >
+                    实时分时 →
+                </button>
                 {quote && (
                     <div className="stock-price-card">
                         <div className="stock-price-main">

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
 import ReactECharts from 'echarts-for-react'
 import type { QuoteData } from '../types'
+import { useChartTheme } from '../utils/chartTheme'
 
 interface PricePoint {
     time: string
@@ -102,7 +103,8 @@ export default function RealtimeChart() {
             : points
 
     const isUp = (quote?.changePercent ?? 0) >= 0
-    const lineColor = isUp ? '#ef5350' : '#26a69a'
+    const theme = useChartTheme()
+    const lineColor = isUp ? theme.up : theme.down
 
     const option = {
         backgroundColor: 'transparent',
@@ -122,15 +124,15 @@ export default function RealtimeChart() {
             axisLabel: {
                 interval: Math.floor(displayPoints.length / 8),
                 fontSize: 11,
-                color: '#aaa',
+                color: theme.axis,
             },
-            axisLine: { lineStyle: { color: '#333' } },
+            axisLine: { lineStyle: { color: theme.axisLine } },
         },
         yAxis: {
             type: 'value',
             scale: true,
-            axisLabel: { fontSize: 11, color: '#aaa' },
-            splitLine: { lineStyle: { color: '#1e2a3a' } },
+            axisLabel: { fontSize: 11, color: theme.axis },
+            splitLine: { lineStyle: { color: theme.split } },
         },
         dataZoom: [
             { type: 'inside', start: 0, end: 100 },
@@ -167,9 +169,9 @@ export default function RealtimeChart() {
                                   formatter: `开盘 ${basePriceVal}`,
                                   position: 'end',
                                   fontSize: 11,
-                                  color: '#888',
+                                  color: theme.axis,
                               },
-                              lineStyle: { type: 'dashed', color: '#888', width: 1.5 },
+                              lineStyle: { type: 'dashed', color: theme.axis, width: 1.5 },
                           }
                         : undefined,
             },
@@ -192,7 +194,7 @@ export default function RealtimeChart() {
                 <div className="realtime-quote-bar">
                     <span
                         className="realtime-price"
-                        style={{ color: isUp ? '#ef5350' : '#26a69a' }}
+                        style={{ color: lineColor }}
                     >
                         {quote.price}
                     </span>
