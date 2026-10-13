@@ -44,6 +44,8 @@ const api = {
         getBatchQuotes: (codes: string[]) => ipcRenderer.invoke('market:getBatchQuotes', codes),
         getKLine: (code: string, days: number = 60) =>
             ipcRenderer.invoke('market:getKLine', code, days),
+        getKLineEx: (code: string, period?: string, adjust?: string, limit?: number) =>
+            ipcRenderer.invoke('market:getKLineEx', code, period, adjust, limit),
         getWeeklyKLine: (code: string, weeks: number = 60) =>
             ipcRenderer.invoke('market:getWeeklyKLine', code, weeks),
         getMonthlyKLine: (code: string, months: number = 36) =>
@@ -70,10 +72,140 @@ const api = {
         getSectorCapitalFlow: (topN?: number) =>
             ipcRenderer.invoke('market:getSectorCapitalFlow', topN),
         getMarketFlowSnapshot: () => ipcRenderer.invoke('market:getMarketFlowSnapshot'),
+        getIndexTicker: () => ipcRenderer.invoke('market:getIndexTicker'),
+        getBreadth: () => ipcRenderer.invoke('market:getBreadth'),
+        getSectorHeatmap: (topN?: number) => ipcRenderer.invoke('market:getSectorHeatmap', topN),
+        getNewsFlash: (count?: number) => ipcRenderer.invoke('market:getNewsFlash', count),
+        getRegime: () => ipcRenderer.invoke('market:getRegime'),
         getSectorTopStocks: (bkCode: string, topN?: number) =>
             ipcRenderer.invoke('market:getSectorTopStocks', bkCode, topN),
         getFundamentals: (code: string) =>
             ipcRenderer.invoke('market:getFundamentals', code),
+    },
+
+    stock: {
+        news: (code: string, count?: number) => ipcRenderer.invoke('stock:news', code, count),
+        notices: (code: string, count?: number) => ipcRenderer.invoke('stock:notices', code, count),
+        tagSentiment: (
+            stock: { code: string; name: string },
+            items: Array<{ id: string; title: string; summary?: string }>
+        ) => ipcRenderer.invoke('stock:tagSentiment', stock, items),
+    },
+
+    backtest: {
+        strategies: () => ipcRenderer.invoke('backtest:strategies'),
+        run: (input: {
+            code: string
+            name: string
+            strategy: string
+            params?: Record<string, number>
+            days?: number
+        }) => ipcRenderer.invoke('backtest:run', input),
+    },
+
+    portfolio: {
+        analytics: (days?: number) => ipcRenderer.invoke('portfolio:analytics', days),
+    },
+
+    // 条件选股
+    screener: {
+        meta: () => ipcRenderer.invoke('screener:meta'),
+        run: (criteria: unknown, requestId?: string) => ipcRenderer.invoke('screener:run', criteria, requestId),
+        cancel: (requestId: string) => ipcRenderer.invoke('screener:cancel', requestId),
+        onProgress: (cb: (data: { requestId?: string; done: number; total: number; hits: number }) => void) => {
+            const handler = (_: unknown, data: { requestId?: string; done: number; total: number; hits: number }) => cb(data)
+            ipcRenderer.on('screener:progress', handler)
+            return () => ipcRenderer.removeListener('screener:progress', handler)
+        },
+    },
+
+    // 技术信号监控
+    signals: {
+        meta: () => ipcRenderer.invoke('signals:meta'),
+        listWatch: () => ipcRenderer.invoke('signals:listWatch'),
+        addWatch: (items: Array<{ code: string; name: string }>, periods?: string, signals?: string) =>
+            ipcRenderer.invoke('signals:addWatch', items, periods, signals),
+        updateWatch: (id: number, patch: { periods?: string; signals?: string; enabled?: boolean; note?: string }) =>
+            ipcRenderer.invoke('signals:updateWatch', id, patch),
+        removeWatch: (id: number) => ipcRenderer.invoke('signals:removeWatch', id),
+        setDefaults: (d: { periods?: string[]; signals?: string[]; enabled?: boolean }) =>
+            ipcRenderer.invoke('signals:setDefaults', d),
+        scanNow: () => ipcRenderer.invoke('signals:scanNow'),
+        backfill: () => ipcRenderer.invoke('signals:backfill'),
+        events: (q?: unknown) => ipcRenderer.invoke('signals:events', q),
+        unreadCount: () => ipcRenderer.invoke('signals:unreadCount'),
+        markRead: () => ipcRenderer.invoke('signals:markRead'),
+        clearEvents: () => ipcRenderer.invoke('signals:clearEvents'),
+        stats: (q?: { since?: string; code?: string; period?: string }) => ipcRenderer.invoke('signals:stats', q),
+        onChanged: (cb: (data: { unread: number }) => void) => {
+            const handler = (_: unknown, data: { unread: number }) => cb(data)
+            ipcRenderer.on('signals:changed', handler)
+            return () => ipcRenderer.removeListener('signals:changed', handler)
+        },
+    },
+
+    // 自动更新
+    updater: {
+        getState: () => ipcRenderer.invoke('updater:getState'),
+        check: () => ipcRenderer.invoke('updater:check'),
+        download: () => ipcRenderer.invoke('updater:download'),
+        install: () => ipcRenderer.invoke('updater:install'),
+        openReleases: () => ipcRenderer.invoke('updater:openReleases'),
+        onState: (cb: (state: unknown) => void) => {
+            const handler = (_: unknown, s: unknown) => cb(s)
+            ipcRenderer.on('updater:state', handler)
+            return () => ipcRenderer.removeListener('updater:state', handler)
+        },
+    },
+
+    // 价格提醒
+    alerts: {
+        list: () => ipcRenderer.invoke('alerts:list'),
+        add: (input: {
+            code: string
+            name: string
+            kind: 'price_above' | 'price_below' | 'pct_above' | 'pct_below'
+            target: number
+            note?: string
+            source?: string
+            repeatDaily?: boolean
+        }) => ipcRenderer.invoke('alerts:add', input),
+        setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('alerts:setEnabled', id, enabled),
+        delete: (id: number) => ipcRenderer.invoke('alerts:delete', id),
+        events: (limit?: number) => ipcRenderer.invoke('alerts:events', limit),
+        unreadCount: () => ipcRenderer.invoke('alerts:unreadCount'),
+        markRead: () => ipcRenderer.invoke('alerts:markRead'),
+        clearEvents: () => ipcRenderer.invoke('alerts:clearEvents'),
+        checkNow: () => ipcRenderer.invoke('alerts:checkNow'),
+        onChanged: (cb: (data: { unread: number }) => void) => {
+            const handler = (_: unknown, data: { unread: number }) => cb(data)
+            ipcRenderer.on('alerts:changed', handler)
+            return () => ipcRenderer.removeListener('alerts:changed', handler)
+        },
+    },
+
+    backup: {
+        export: (kind: 'json' | 'db' | 'holdings-csv' | 'trades-csv', includeChat?: boolean) =>
+            ipcRenderer.invoke('backup:export', kind, includeChat),
+        import: () => ipcRenderer.invoke('backup:import'),
+        revealDataDir: () => ipcRenderer.invoke('backup:revealDataDir'),
+    },
+
+    app: {
+        dataSourceStatus: () => ipcRenderer.invoke('app:dataSourceStatus'),
+        probeDataSource: () => ipcRenderer.invoke('app:probeDataSource'),
+        setTrayEnabled: (enabled: boolean) => ipcRenderer.invoke('app:setTrayEnabled', enabled),
+        onNavigate: (cb: (route: string) => void) => {
+            const handler = (_: unknown, route: string) => cb(route)
+            ipcRenderer.on('navigate-to', handler)
+            return () => ipcRenderer.removeListener('navigate-to', handler)
+        },
+        // 主进程拦截 Cmd/Ctrl+R 后通知渲染层刷新当前页数据
+        onRefresh: (cb: () => void) => {
+            const handler = () => cb()
+            ipcRenderer.on('app:refresh', handler)
+            return () => ipcRenderer.removeListener('app:refresh', handler)
+        },
     },
 
     // Settings
@@ -174,13 +306,26 @@ const api = {
             capital?: number
             riskLevel?: string
             requestId?: string
+            debateRounds?: number
         }) => ipcRenderer.invoke('ai:agentDecision', payload),
         onAgentProgress: (
-            cb: (data: { requestId: string; node: string; label: string }) => void
+            cb: (data: {
+                requestId: string
+                node: string
+                label: string
+                content?: string
+                round?: number
+            }) => void
         ): (() => void) => {
             const handler = (
                 _e: Electron.IpcRendererEvent,
-                data: { requestId: string; node: string; label: string }
+                data: {
+                    requestId: string
+                    node: string
+                    label: string
+                    content?: string
+                    round?: number
+                }
             ) => cb(data)
             ipcRenderer.on('ai:agentDecision:progress', handler)
             return () => ipcRenderer.removeListener('ai:agentDecision:progress', handler)
@@ -264,6 +409,7 @@ const api = {
         list: (limit?: number) => ipcRenderer.invoke('decision:list', limit),
         getById: (id: number) => ipcRenderer.invoke('decision:getById', id),
         stats: (days?: number) => ipcRenderer.invoke('decision:stats', days),
+        scorecard: (days?: number) => ipcRenderer.invoke('decision:scorecard', days),
         review: (decisionId?: number) => ipcRenderer.invoke('decision:review', decisionId),
         delete: (id: number) => ipcRenderer.invoke('decision:delete', id),
     },

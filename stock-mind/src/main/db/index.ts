@@ -1,7 +1,8 @@
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { app } from 'electron'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync } from 'fs'
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js'
+import { applyTrade } from '../services/positionMath'
 
 let db: Database
 let SQL: SqlJsStatic
@@ -24,8 +25,7 @@ export async function initDatabase(): Promise<void> {
 
     if (existsSync(dbPath)) {
         console.log(`Loading existing database from ${dbPath}`)
-        const fileBuffer = readFileSync(dbPath)
-        db = new SQL.Database(fileBuffer)
+        db = loadWithRecovery()
     } else {
         console.log(`Creating new database at ${dbPath}`)
         db = new SQL.Database()
@@ -34,8 +34,46 @@ export async function initDatabase(): Promise<void> {
     createTables()
     migrateTables()
     seedDefaultData()
-    persist()
+    dirty = true
+    flush()
     console.log(`Database initialized at ${dbPath}`)
+}
+
+/** 尝试打开一个 sql.js 数据库文件，损坏则返回 null（用一次查询触发解析以暴露损坏） */
+function tryOpen(path: string): Database | null {
+    try {
+        const d = new SQL.Database(readFileSync(path))
+        d.exec('SELECT count(*) FROM sqlite_master')
+        return d
+    } catch (e) {
+        console.error(`[db] 打开 ${path} 失败:`, e)
+        return null
+    }
+}
+
+/**
+ * 带自愈的加载：主库损坏时回退到上一份已知可用的 .bak 备份，
+ * 并把损坏的主库另存为 .corrupt 以便排查；都不可用时退回空库。
+ */
+function loadWithRecovery(): Database {
+    const main = tryOpen(dbPath)
+    if (main) return main
+
+    const bakPath = `${dbPath}.bak`
+    if (existsSync(bakPath)) {
+        console.warn('[db] 主数据库损坏，尝试从 .bak 备份恢复')
+        const bak = tryOpen(bakPath)
+        if (bak) {
+            try {
+                copyFileSync(dbPath, `${dbPath}.corrupt`)
+            } catch {
+                /* 另存损坏库失败不阻断恢复 */
+            }
+            return bak
+        }
+    }
+    console.warn('[db] 无可用数据库文件，创建新库')
+    return new SQL.Database()
 }
 
 function seedDefaultData(): void {
@@ -105,13 +143,43 @@ function seedDefaultData(): void {
     }
 }
 
-function persist(): void {
-    const data = db.export()
-    const dbDir = join(dbPath, '..')
+let dirty = false
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+const PERSIST_DEBOUNCE_MS = 500
+
+// 原子落盘：先写临时文件，再把当前库备份成 .bak，最后用 rename 原子替换。
+// rename 在同一文件系统上是原子操作，写到一半崩溃也不会损坏主库文件。
+function writeDbFileAtomic(): void {
+    const data = Buffer.from(db.export())
+    const dbDir = dirname(dbPath)
     if (!existsSync(dbDir)) {
-        require('fs').mkdirSync(dbDir, { recursive: true })
+        mkdirSync(dbDir, { recursive: true })
     }
-    writeFileSync(dbPath, Buffer.from(data))
+    const tmpPath = `${dbPath}.tmp`
+    writeFileSync(tmpPath, data)
+    if (existsSync(dbPath)) {
+        try {
+            copyFileSync(dbPath, `${dbPath}.bak`)
+        } catch {
+            /* 备份失败不阻断主写入 */
+        }
+    }
+    renameSync(tmpPath, dbPath)
+    dirty = false
+}
+
+// 延迟批量落盘：高频写入时合并成一次写，避免每次都把整个数据库重写一遍。
+function persist(): void {
+    dirty = true
+    if (persistTimer) return
+    persistTimer = setTimeout(() => {
+        persistTimer = null
+        try {
+            writeDbFileAtomic()
+        } catch (e) {
+            console.error('[db] 落盘失败:', e)
+        }
+    }, PERSIST_DEBOUNCE_MS)
 }
 
 type SqlParam = string | number | null | Uint8Array
@@ -125,8 +193,75 @@ function runNoPersist(sql: string, params: SqlParam[] = []): void {
     db.run(sql, params)
 }
 
+// 立即同步落盘（关键操作完成后、退出前调用），确保数据已写入磁盘。
 export function flush(): void {
-    persist()
+    if (persistTimer) {
+        clearTimeout(persistTimer)
+        persistTimer = null
+    }
+    if (dirty) {
+        try {
+            writeDbFileAtomic()
+        } catch (e) {
+            console.error('[db] 落盘失败:', e)
+        }
+    }
+}
+
+export function getDbPath(): string {
+    return dbPath
+}
+
+/** 导出全部业务表（备份用）。表名 → 行数组，不含 sqlite 内部表 */
+export function dumpAllTables(options: { includeChat?: boolean } = {}): Record<string, unknown[]> {
+    const names = all<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).map((r) => r.name)
+    // 对话记录和 LangGraph checkpoint 体积大且可再生，默认不进备份
+    const chatTables = ['chat_sessions', 'chat_messages', 'chat_checkpoints', 'chat_writes']
+    const out: Record<string, unknown[]> = {}
+    for (const name of names) {
+        if (!options.includeChat && chatTables.includes(name)) continue
+        out[name] = all(`SELECT * FROM "${name}"`)
+    }
+    return out
+}
+
+/** 用备份数据整库覆盖：先清空同名表再按行插入，整体包在事务里 */
+export function restoreTables(tables: Record<string, unknown[]>): { restored: string[]; skipped: string[] } {
+    const existing = new Set(
+        all<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).map((r) => r.name)
+    )
+    const restored: string[] = []
+    const skipped: string[] = []
+    db.run('BEGIN')
+    try {
+        for (const [name, rows] of Object.entries(tables)) {
+            if (!existing.has(name)) {
+                skipped.push(name)
+                continue
+            }
+            db.run(`DELETE FROM "${name}"`)
+            for (const row of rows as Array<Record<string, SqlParam>>) {
+                const cols = Object.keys(row)
+                if (cols.length === 0) continue
+                const placeholders = cols.map(() => '?').join(', ')
+                db.run(
+                    `INSERT OR REPLACE INTO "${name}" (${cols.map((c) => `"${c}"`).join(', ')}) VALUES (${placeholders})`,
+                    cols.map((c) => row[c])
+                )
+            }
+            restored.push(name)
+        }
+        db.run('COMMIT')
+    } catch (e) {
+        db.run('ROLLBACK')
+        throw e
+    }
+    flush() // 整库覆盖是关键操作，立即落盘
+    return { restored, skipped }
 }
 
 function all<T>(sql: string, params: SqlParam[] = []): T[] {
@@ -156,6 +291,9 @@ function createTables(): void {
       name TEXT NOT NULL,
       sector TEXT NOT NULL DEFAULT '',
       sub_sector TEXT NOT NULL DEFAULT '',
+      -- cost_price 是历史列：addHolding/addTrade 为兼容旧库会同时写两列，
+      -- 新建库若不保留它，全新安装时插入持仓会直接报 "no column named cost_price"
+      cost_price REAL NOT NULL DEFAULT 0,
       avg_cost_price REAL NOT NULL,
       quantity INTEGER NOT NULL,
       created_at TEXT DEFAULT (datetime('now')),
@@ -276,6 +414,35 @@ function createTables(): void {
     CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_thread ON chat_checkpoints(thread_id, checkpoint_ns, checkpoint_id);
     CREATE INDEX IF NOT EXISTS idx_chat_writes_thread ON chat_writes(thread_id, checkpoint_ns, checkpoint_id);
 
+    CREATE TABLE IF NOT EXISTS price_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('price_above', 'price_below', 'pct_above', 'pct_below')),
+      target REAL NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'manual',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      repeat_daily INTEGER NOT NULL DEFAULT 0,
+      last_triggered_at TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_price_alerts_code ON price_alerts(code);
+
+    CREATE TABLE IF NOT EXISTS alert_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      alert_id INTEGER,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      message TEXT NOT NULL,
+      price REAL,
+      is_read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_alert_events_created ON alert_events(created_at DESC);
+
     CREATE TABLE IF NOT EXISTS decision_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       decision_date TEXT NOT NULL,
@@ -326,6 +493,39 @@ function createTables(): void {
     CREATE INDEX IF NOT EXISTS idx_pick_reviews_decision ON decision_pick_reviews(decision_id);
     CREATE INDEX IF NOT EXISTS idx_pick_reviews_status ON decision_pick_reviews(status);
     CREATE INDEX IF NOT EXISTS idx_pick_reviews_code ON decision_pick_reviews(code);
+
+    -- 技术信号监控池：与自选股解耦，每只票可单独设周期和信号，留空则继承全局默认
+    CREATE TABLE IF NOT EXISTS signal_watch (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      periods TEXT NOT NULL DEFAULT '',
+      signals TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      note TEXT NOT NULL DEFAULT '',
+      last_scanned_at TEXT,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    -- 信号流水：同一只票同一周期同一根K线的同一信号只记一次（UNIQUE 去重）
+    CREATE TABLE IF NOT EXISTS signal_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      period TEXT NOT NULL,
+      signal_id TEXT NOT NULL,
+      signal_name TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK(direction IN ('buy', 'sell')),
+      bar_time TEXT NOT NULL,
+      price REAL NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      is_read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      UNIQUE(code, period, signal_id, bar_time)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_signal_events_bar ON signal_events(bar_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_signal_events_code ON signal_events(code);
   `)
 }
 
@@ -710,17 +910,9 @@ export function addTrade(holdingId: number, tradeType: 'buy' | 'sell', costPrice
     
     if (!holding) throw new Error('持仓不存在')
     
-    let newQuantity: number
-    let newAvgCost: number
-    
-    if (tradeType === 'buy') {
-        newQuantity = holding.quantity + quantity
-        newAvgCost = ((holding.avg_cost_price * holding.quantity) + (costPrice * quantity)) / newQuantity
-    } else {
-        if (holding.quantity < quantity) throw new Error('持仓数量不足')
-        newQuantity = holding.quantity - quantity
-        newAvgCost = holding.avg_cost_price
-    }
+    const next = applyTrade({ quantity: holding.quantity, avgCost: holding.avg_cost_price }, tradeType, costPrice, quantity)
+    const newQuantity = next.quantity
+    const newAvgCost = next.avgCost
     
     run('INSERT INTO holding_trades (holding_id, trade_type, cost_price, quantity, note) VALUES (?, ?, ?, ?, ?)', [
         holdingId,
@@ -1459,3 +1651,467 @@ export function deleteDecision(id: number): void {
     runNoPersist('DELETE FROM decision_history WHERE id = ?', [id])
     flush()
 }
+
+// ─── 价格提醒 ───────────────────────────────────────────────────────────
+
+export type PriceAlertKind = 'price_above' | 'price_below' | 'pct_above' | 'pct_below'
+
+export interface PriceAlertRow {
+    id: number
+    code: string
+    name: string
+    kind: PriceAlertKind
+    target: number
+    note: string
+    source: string
+    enabled: number
+    repeat_daily: number
+    last_triggered_at: string | null
+    created_at: string
+}
+
+export interface AlertEventRow {
+    id: number
+    alert_id: number | null
+    code: string
+    name: string
+    message: string
+    price: number | null
+    is_read: number
+    created_at: string
+}
+
+export function listPriceAlerts(): PriceAlertRow[] {
+    return all<PriceAlertRow>('SELECT * FROM price_alerts ORDER BY enabled DESC, created_at DESC')
+}
+
+export function listActivePriceAlerts(): PriceAlertRow[] {
+    return all<PriceAlertRow>('SELECT * FROM price_alerts WHERE enabled = 1')
+}
+
+export function addPriceAlert(input: {
+    code: string
+    name: string
+    kind: PriceAlertKind
+    target: number
+    note?: string
+    source?: string
+    repeatDaily?: boolean
+}): PriceAlertRow | undefined {
+    runNoPersist(
+        'INSERT INTO price_alerts (code, name, kind, target, note, source, repeat_daily) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [input.code, input.name, input.kind, input.target, input.note ?? '', input.source ?? 'manual', input.repeatDaily ? 1 : 0]
+    )
+    const row = get<PriceAlertRow>('SELECT * FROM price_alerts WHERE id = last_insert_rowid()')
+    persist()
+    return row
+}
+
+export function setPriceAlertEnabled(id: number, enabled: boolean): void {
+    // 重新启用时清掉上次触发时间，让它可以再次触发
+    run('UPDATE price_alerts SET enabled = ?, last_triggered_at = CASE WHEN ? = 1 THEN NULL ELSE last_triggered_at END WHERE id = ?', [
+        enabled ? 1 : 0,
+        enabled ? 1 : 0,
+        id,
+    ])
+}
+
+export function deletePriceAlert(id: number): void {
+    run('DELETE FROM price_alerts WHERE id = ?', [id])
+}
+
+export function recordAlertTriggered(alert: PriceAlertRow, message: string, price: number): void {
+    runNoPersist(
+        "UPDATE price_alerts SET last_triggered_at = datetime('now', 'localtime'), enabled = CASE WHEN repeat_daily = 1 THEN 1 ELSE 0 END WHERE id = ?",
+        [alert.id]
+    )
+    runNoPersist('INSERT INTO alert_events (alert_id, code, name, message, price) VALUES (?, ?, ?, ?, ?)', [
+        alert.id,
+        alert.code,
+        alert.name,
+        message,
+        price,
+    ])
+    persist()
+}
+
+export function listAlertEvents(limit: number = 100): AlertEventRow[] {
+    return all<AlertEventRow>('SELECT * FROM alert_events ORDER BY id DESC LIMIT ?', [limit])
+}
+
+export function countUnreadAlertEvents(): number {
+    return get<{ n: number }>('SELECT COUNT(*) AS n FROM alert_events WHERE is_read = 0')?.n ?? 0
+}
+
+export function markAlertEventsRead(): void {
+    run('UPDATE alert_events SET is_read = 1 WHERE is_read = 0')
+}
+
+export function clearAlertEvents(): void {
+    run('DELETE FROM alert_events')
+}
+
+// ─── 技术信号监控 ───────────────────────────────────────────────────────
+
+export interface SignalWatchRow {
+    id: number
+    code: string
+    name: string
+    /** 逗号分隔的周期，如 "day,60m"；空串表示继承全局默认 */
+    periods: string
+    /** 逗号分隔的信号 id；空串表示继承全局默认 */
+    signals: string
+    enabled: number
+    note: string
+    last_scanned_at: string | null
+    created_at: string
+}
+
+export interface SignalEventRow {
+    id: number
+    code: string
+    name: string
+    period: string
+    signal_id: string
+    signal_name: string
+    direction: 'buy' | 'sell'
+    bar_time: string
+    price: number
+    detail: string
+    is_read: number
+    created_at: string
+}
+
+export function listSignalWatch(): SignalWatchRow[] {
+    return all<SignalWatchRow>('SELECT * FROM signal_watch ORDER BY enabled DESC, created_at DESC')
+}
+
+/** 批量加入监控池，已存在的跳过；返回新增数量 */
+export function addSignalWatch(items: Array<{ code: string; name: string }>, periods = '', signals = ''): number {
+    let added = 0
+    for (const it of items) {
+        runNoPersist('INSERT OR IGNORE INTO signal_watch (code, name, periods, signals) VALUES (?, ?, ?, ?)', [
+            it.code,
+            it.name,
+            periods,
+            signals,
+        ])
+        added += db.getRowsModified()
+    }
+    persist()
+    return added
+}
+
+export function updateSignalWatch(
+    id: number,
+    patch: { periods?: string; signals?: string; enabled?: boolean; note?: string }
+): void {
+    const sets: string[] = []
+    const params: SqlParam[] = []
+    if (patch.periods !== undefined) (sets.push('periods = ?'), params.push(patch.periods))
+    if (patch.signals !== undefined) (sets.push('signals = ?'), params.push(patch.signals))
+    if (patch.enabled !== undefined) (sets.push('enabled = ?'), params.push(patch.enabled ? 1 : 0))
+    if (patch.note !== undefined) (sets.push('note = ?'), params.push(patch.note))
+    if (sets.length === 0) return
+    run(`UPDATE signal_watch SET ${sets.join(', ')} WHERE id = ?`, [...params, id])
+}
+
+export function removeSignalWatch(id: number): void {
+    run('DELETE FROM signal_watch WHERE id = ?', [id])
+}
+
+export function markSignalWatchScanned(ids: number[]): void {
+    if (ids.length === 0) return
+    runNoPersist(
+        `UPDATE signal_watch SET last_scanned_at = datetime('now', 'localtime') WHERE id IN (${ids.map(() => '?').join(',')})`,
+        ids
+    )
+}
+
+/** 写入信号，返回是否为新信号（同一根K线重复判定时返回 false）。回填的历史信号直接标记已读 */
+export function insertSignalEvent(e: Omit<SignalEventRow, 'id' | 'is_read' | 'created_at'>, read = false): boolean {
+    runNoPersist(
+        `INSERT OR IGNORE INTO signal_events (code, name, period, signal_id, signal_name, direction, bar_time, price, detail, is_read)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [e.code, e.name, e.period, e.signal_id, e.signal_name, e.direction, e.bar_time, e.price, e.detail, read ? 1 : 0]
+    )
+    return db.getRowsModified() > 0
+}
+
+export function flushSignals(): void {
+    persist()
+}
+
+export interface SignalEventQuery {
+    keyword?: string
+    period?: string
+    direction?: 'buy' | 'sell'
+    /** bar_time >= since（YYYY-MM-DD） */
+    since?: string
+    until?: string
+    limit?: number
+    offset?: number
+}
+
+function signalWhere(q: SignalEventQuery): { where: string; params: SqlParam[] } {
+    const conds: string[] = []
+    const params: SqlParam[] = []
+    if (q.keyword?.trim()) {
+        conds.push('(code LIKE ? OR name LIKE ?)')
+        params.push(`%${q.keyword.trim()}%`, `%${q.keyword.trim()}%`)
+    }
+    if (q.period) (conds.push('period = ?'), params.push(q.period))
+    if (q.direction) (conds.push('direction = ?'), params.push(q.direction))
+    if (q.since) (conds.push('bar_time >= ?'), params.push(q.since))
+    // until 是日期，要包含当天的分钟K
+    if (q.until) (conds.push('bar_time <= ?'), params.push(`${q.until} 99`))
+    return { where: conds.length ? `WHERE ${conds.join(' AND ')}` : '', params }
+}
+
+export function listSignalEvents(q: SignalEventQuery = {}): { rows: SignalEventRow[]; total: number } {
+    const { where, params } = signalWhere(q)
+    const total = get<{ n: number }>(`SELECT COUNT(*) AS n FROM signal_events ${where}`, params)?.n ?? 0
+    const rows = all<SignalEventRow>(
+        `SELECT * FROM signal_events ${where} ORDER BY bar_time DESC, id DESC LIMIT ? OFFSET ?`,
+        [...params, Math.min(500, q.limit ?? 50), q.offset ?? 0]
+    )
+    return { rows, total }
+}
+
+/** 统计用：区间内全部信号（按时间升序） */
+export function listSignalEventsForStats(q: SignalEventQuery = {}): SignalEventRow[] {
+    const { where, params } = signalWhere(q)
+    return all<SignalEventRow>(`SELECT * FROM signal_events ${where} ORDER BY bar_time ASC, id ASC`, params)
+}
+
+export function countUnreadSignalEvents(): number {
+    return get<{ n: number }>('SELECT COUNT(*) AS n FROM signal_events WHERE is_read = 0')?.n ?? 0
+}
+
+export function markSignalEventsRead(): void {
+    run('UPDATE signal_events SET is_read = 1 WHERE is_read = 0')
+}
+
+export function clearSignalEvents(): void {
+    run('DELETE FROM signal_events')
+}
+
+// ─── AI 战绩切片统计 ────────────────────────────────────────────────────
+//
+// decision_pick_reviews 里已经有每条推荐的真实走势结果，这里把它按不同维度切片，
+// 回答「AI 在什么情况下靠得住」：市场状态、推荐优先级、入场方式、离场原因、个股。
+
+export interface ScorecardSlice {
+    key: string
+    label: string
+    /** 可执行（watch 且给了入场价）的推荐数 */
+    actionable: number
+    /** 实际触发入场的数量 */
+    triggered: number
+    /** 已完成复盘并有收益结果的数量 */
+    closed: number
+    wins: number
+    winRate: number | null
+    avgReturnPct: number | null
+    totalPnl: number
+}
+
+export interface ScorecardPick {
+    decisionDate: string
+    regime: string | null
+    code: string
+    name: string
+    priority: number | null
+    entryPrice: number | null
+    exitReason: string | null
+    returnPct: number | null
+}
+
+export interface DecisionScorecard {
+    days: number
+    overall: ScorecardSlice
+    byRegime: ScorecardSlice[]
+    byPriority: ScorecardSlice[]
+    byEntryType: ScorecardSlice[]
+    byExitReason: ScorecardSlice[]
+    byStock: ScorecardSlice[]
+    /** 最近完成复盘的明细，供展示与回喂 prompt */
+    recent: ScorecardPick[]
+}
+
+interface ScorecardRawRow {
+    decision_date: string
+    market_regime: string | null
+    code: string
+    name: string
+    priority: number | null
+    action: 'watch' | 'avoid' | null
+    aggressive_entry: number | null
+    conservative_entry: number | null
+    status: string
+    entry_triggered: 0 | 1
+    entry_type: string | null
+    entry_price: number | null
+    exit_reason: string | null
+    return_pct: number | null
+    pnl_amount: number | null
+}
+
+const REGIME_LABELS: Record<string, string> = {
+    offensive: '大盘偏强',
+    defensive: '大盘震荡',
+    cash: '大盘偏弱',
+}
+
+const EXIT_REASON_LABELS: Record<string, string> = {
+    stop_loss: '触发止损',
+    take_profit: '触发止盈',
+    window_end: '窗口末收盘',
+    not_triggered: '未触发入场',
+    not_applicable: '回避标的',
+}
+
+function emptySlice(key: string, label: string): ScorecardSlice {
+    return { key, label, actionable: 0, triggered: 0, closed: 0, wins: 0, winRate: null, avgReturnPct: null, totalPnl: 0 }
+}
+
+function buildSlices(
+    rows: ScorecardRawRow[],
+    keyOf: (r: ScorecardRawRow) => { key: string; label: string } | null
+): ScorecardSlice[] {
+    const map = new Map<string, { slice: ScorecardSlice; returns: number[] }>()
+    for (const r of rows) {
+        const k = keyOf(r)
+        if (!k) continue
+        let entry = map.get(k.key)
+        if (!entry) {
+            entry = { slice: emptySlice(k.key, k.label), returns: [] }
+            map.set(k.key, entry)
+        }
+        accumulate(entry, r)
+    }
+    return [...map.values()].map((e) => finalize(e)).sort((a, b) => b.actionable - a.actionable)
+}
+
+function accumulate(entry: { slice: ScorecardSlice; returns: number[] }, r: ScorecardRawRow): void {
+    const s = entry.slice
+    const isActionable = r.action === 'watch' && (r.aggressive_entry !== null || r.conservative_entry !== null)
+    if (isActionable) s.actionable++
+    if (r.entry_triggered === 1) s.triggered++
+    if (r.action === 'watch' && r.status === 'reviewed' && r.entry_triggered === 1 && r.return_pct !== null) {
+        s.closed++
+        if (r.return_pct > 0) s.wins++
+        entry.returns.push(r.return_pct)
+        s.totalPnl += r.pnl_amount ?? 0
+    }
+}
+
+function finalize(entry: { slice: ScorecardSlice; returns: number[] }): ScorecardSlice {
+    const s = entry.slice
+    s.winRate = s.closed > 0 ? (s.wins / s.closed) * 100 : null
+    s.avgReturnPct = entry.returns.length > 0 ? entry.returns.reduce((a, b) => a + b, 0) / entry.returns.length : null
+    return s
+}
+
+function parseRegime(raw: string | null): string | null {
+    if (!raw) return null
+    try {
+        const r = JSON.parse(raw)?.regime
+        return typeof r === 'string' ? r : null
+    } catch {
+        return null
+    }
+}
+
+export function getDecisionScorecard(days: number): DecisionScorecard {
+    const sinceDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10)
+    const rows = all<ScorecardRawRow>(
+        `SELECT dh.decision_date, dh.market_regime, dpr.code, dpr.name, dpr.priority, dpr.action,
+                dpr.aggressive_entry, dpr.conservative_entry, dpr.status, dpr.entry_triggered,
+                dpr.entry_type, dpr.entry_price, dpr.exit_reason, dpr.return_pct, dpr.pnl_amount
+         FROM decision_history dh
+         JOIN decision_pick_reviews dpr ON dpr.decision_id = dh.id
+         WHERE dh.decision_date >= ?
+         ORDER BY dh.decision_date DESC, dpr.priority ASC`,
+        [sinceDate]
+    )
+
+    const overallEntry = { slice: emptySlice('overall', '全部'), returns: [] as number[] }
+    for (const r of rows) accumulate(overallEntry, r)
+
+    return {
+        days,
+        overall: finalize(overallEntry),
+        byRegime: buildSlices(rows, (r) => {
+            const regime = parseRegime(r.market_regime)
+            return regime ? { key: regime, label: REGIME_LABELS[regime] ?? regime } : null
+        }),
+        byPriority: buildSlices(rows, (r) =>
+            r.action === 'watch' && r.priority !== null
+                ? { key: String(r.priority), label: `第 ${r.priority} 推荐` }
+                : null
+        ).sort((a, b) => Number(a.key) - Number(b.key)),
+        byEntryType: buildSlices(rows, (r) =>
+            r.entry_triggered === 1 && r.entry_type
+                ? { key: r.entry_type, label: r.entry_type === 'aggressive' ? '激进价入场' : '保守价入场' }
+                : null
+        ),
+        byExitReason: buildSlices(rows, (r) =>
+            r.exit_reason ? { key: r.exit_reason, label: EXIT_REASON_LABELS[r.exit_reason] ?? r.exit_reason } : null
+        ),
+        byStock: buildSlices(rows, (r) => ({ key: r.code, label: `${r.name} ${r.code}` })).slice(0, 12),
+        recent: rows
+            .filter((r) => r.status === 'reviewed' && r.entry_triggered === 1 && r.return_pct !== null)
+            .slice(0, 20)
+            .map((r) => ({
+                decisionDate: r.decision_date,
+                regime: parseRegime(r.market_regime),
+                code: r.code,
+                name: r.name,
+                priority: r.priority,
+                entryPrice: r.entry_price,
+                exitReason: r.exit_reason,
+                returnPct: r.return_pct,
+            })),
+    }
+}
+
+/** 把战绩压缩成几行文字，注入决策 prompt，让 AI 看到自己过去的对错 */
+export function formatScorecardForPrompt(days: number = 60): string {
+    const sc = getDecisionScorecard(days)
+    const o = sc.overall
+    if (o.closed === 0) {
+        return '（暂无历史战绩数据：过去的推荐还没有完成复盘，无法据此调整）'
+    }
+    const pct = (v: number | null, digits = 1) => (v === null ? '—' : `${v.toFixed(digits)}%`)
+    const lines: string[] = [
+        `近 ${days} 天：可执行推荐 ${o.actionable} 条，实际触发入场 ${o.triggered} 条，已完成复盘 ${o.closed} 条；` +
+            `胜率 ${pct(o.winRate, 0)}，平均收益 ${pct(o.avgReturnPct, 2)}。`,
+    ]
+    const sliceLine = (title: string, slices: ScorecardSlice[]) => {
+        const valid = slices.filter((s) => s.closed >= 2)
+        if (valid.length === 0) return
+        lines.push(
+            `${title}：` +
+                valid
+                    .map((s) => `${s.label} 胜率 ${pct(s.winRate, 0)}/均收益 ${pct(s.avgReturnPct, 2)}（${s.closed} 笔）`)
+                    .join('；')
+        )
+    }
+    sliceLine('按大盘状态', sc.byRegime)
+    sliceLine('按推荐排序', sc.byPriority)
+    sliceLine('按入场方式', sc.byEntryType)
+    sliceLine('按离场原因', sc.byExitReason)
+
+    const losers = sc.recent.filter((r) => (r.returnPct ?? 0) < 0).slice(0, 5)
+    if (losers.length > 0) {
+        lines.push(
+            '最近亏损案例：' +
+                losers
+                    .map((r) => `${r.decisionDate} ${r.name}（第${r.priority ?? '-'}推荐，${pct(r.returnPct, 1)}，${EXIT_REASON_LABELS[r.exitReason ?? ''] ?? r.exitReason ?? '—'}）`)
+                    .join('；')
+        )
+    }
+    return lines.join('\n')
+}
+

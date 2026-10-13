@@ -1,16 +1,41 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams, useSearchParams, useNavigate } from 'react-router-dom'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import type { KLineData, Holding, DividendRecord, StockFundamentals } from '../types'
-import KLineChart from '../components/KLineChart'
-import BuyAdvicePanel from '../components/BuyAdvicePanel'
+import { useParams, useSearchParams, useNavigate, useLocation } from 'react-router-dom'
+import type { KLineData, Holding, DividendRecord, StockFundamentals, KLinePeriod, AdjustType } from '../types'
+import KLineChart, { type Overlays, type SubIndicator } from '../components/KLineChart'
+import AlertModal from '../components/AlertModal'
+import StockNewsPanel from '../components/StockNewsPanel'
+import BacktestPanel from '../components/BacktestPanel'
 
-type KLineMode = 'day' | 'week' | '5min' | '60min'
+const PERIODS: Array<{ id: KLinePeriod; label: string }> = [
+    { id: '1m', label: '1分' },
+    { id: '5m', label: '5分' },
+    { id: '15m', label: '15分' },
+    { id: '30m', label: '30分' },
+    { id: '60m', label: '60分' },
+    { id: 'day', label: '日K' },
+    { id: 'week', label: '周K' },
+    { id: 'month', label: '月K' },
+]
+const DAY_OPTIONS = [60, 120, 250, 500]
+/** 分钟/周/月线固定取的根数：1 分钟约 1 个交易日，60 分钟约 2 个月 */
+const PERIOD_BARS: Partial<Record<KLinePeriod, number>> = { '1m': 240, '5m': 240, '15m': 240, '30m': 240, '60m': 240, week: 150, month: 120 }
+const ADJUST_TEXT: Record<AdjustType, string> = { none: '不复权', qfq: '前复权', hfq: '后复权' }
+const OVERLAY_ITEMS: Array<{ key: keyof Overlays; label: string; title: string }> = [
+    { key: 'boll', label: 'BOLL', title: '布林带：价格的波动区间，碰上轨偏热、碰下轨偏冷' },
+    { key: 'bbi', label: 'BBI', title: 'BBI 多空线：3/6/12/24 日均线的平均，收盘在其上方偏多' },
+    { key: 'td', label: '九转', title: '神奇九转：连续 9 根收盘高于/低于 4 根前，提示趋势可能衰竭（只标 6~9）' },
+    { key: 'divergence', label: '背离', title: '自动标出价格与副图指标的顶背离/底背离，指标源跟随当前副图' },
+    { key: 'vpvr', label: '筹码分布', title: '成交量分布（VPVR）：可见区间内每个价位成交了多少，黄色为成交最密集的 POC' },
+    { key: 'limit', label: '涨跌停', title: '按昨收画出今日涨停价/跌停价（主板10%、创业/科创20%、北交所30%、ST 5%）' },
+]
 
-const DAY_OPTIONS = [30, 60, 90, 180]
-const INTRADAY_BARS: Record<string, number> = { '5min': 78, '60min': 360 }
-const INTRADAY_SCALES: Record<string, number> = { '5min': 5, '60min': 60 }
+function loadOverlays(): Overlays {
+    try {
+        return JSON.parse(localStorage.getItem('kline_overlays') || '{}')
+    } catch {
+        return {}
+    }
+}
 
 // 基本面卡片：估值/盈利/成长/规模/每股/质量，缺失字段显示「—」
 function fmtNum(v: number | null, d = 2, suffix = ''): string {
@@ -77,13 +102,20 @@ export default function StockDetail() {
     const navigate = useNavigate()
     const name = searchParams.get('name') ?? code ?? ''
 
+    const [showAlert, setShowAlert] = useState(false)
+    const [subIndicator, setSubIndicator] = useState<SubIndicator>('MACD')
+    const [overlays, setOverlays] = useState<Overlays>(loadOverlays)
+    const [showMyTrades, setShowMyTrades] = useState(true)
+
     const [klineData, setKlineData] = useState<KLineData[]>([])
-    const [klineMode, setKlineMode] = useState<KLineMode>('day')
-    const [klineDays, setKlineDays] = useState(60)
-    // 用于买卖价位推导的多周期K线（与图表选中的周期解耦）
-    const [dailyContextKlines, setDailyContextKlines] = useState<KLineData[]>([])
-    const [weeklyContextKlines, setWeeklyContextKlines] = useState<KLineData[]>([])
-    const [monthlyContextKlines, setMonthlyContextKlines] = useState<KLineData[]>([])
+    const initialPeriod = searchParams.get('period') as KLinePeriod | null
+    const [klineMode, setKlineMode] = useState<KLinePeriod>(
+        initialPeriod && PERIODS.some((p) => p.id === initialPeriod) ? initialPeriod : 'day'
+    )
+    const [klineDays, setKlineDays] = useState(120)
+    const [adjust, setAdjust] = useState<AdjustType>(() => (localStorage.getItem('kline_adjust') as AdjustType) || 'qfq')
+    const [klineMeta, setKlineMeta] = useState<{ source: string; adjust: AdjustType } | null>(null)
+    const [watchMsg, setWatchMsg] = useState('')
     const [quote, setQuote] = useState<{
         price: number
         changePercent: number
@@ -122,37 +154,18 @@ export default function StockDetail() {
         }
     }, [code])
 
-    const [klineReading, setKlineReading] = useState<string | null>(null)
-    const [klineReadLoading, setKlineReadLoading] = useState(false)
-    const [klineReadError, setKlineReadError] = useState<string | null>(null)
-
-    const [tradingTResult, setTradingTResult] = useState<string | null>(null)
-    const [tradingTLoading, setTradingTLoading] = useState(false)
-    const [tradingTError, setTradingTError] = useState<string | null>(null)
+    // 从选股结果「详情/回测」跳过来时，K线加载完滚到回测面板
+    const location = useLocation()
+    useEffect(() => {
+        if (location.hash === '#backtest' && klineData.length > 0) {
+            document.getElementById('backtest')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+    }, [location.hash, klineData.length > 0])
 
     useEffect(() => {
         if (!code) return
         loadData()
-    }, [code, klineMode, klineDays])
-
-    // 每次换股：拉一次多周期K线作为买卖价位推导的固定上下文
-    useEffect(() => {
-        if (!code) return
-        let cancelled = false
-        Promise.allSettled([
-            window.api.market.getKLine(code, 90),
-            window.api.market.getWeeklyKLine(code, 60),
-            window.api.market.getMonthlyKLine(code, 36),
-        ]).then((results) => {
-            if (cancelled) return
-            if (results[0].status === 'fulfilled') setDailyContextKlines(results[0].value)
-            if (results[1].status === 'fulfilled') setWeeklyContextKlines(results[1].value)
-            if (results[2].status === 'fulfilled') setMonthlyContextKlines(results[2].value)
-        })
-        return () => {
-            cancelled = true
-        }
-    }, [code])
+    }, [code, klineMode, klineDays, adjust])
 
     // 每次换股：拉一次基本面（与K线周期切换解耦）
     useEffect(() => {
@@ -174,16 +187,10 @@ export default function StockDetail() {
         if (!code) return
         setLoadError(null)
         try {
-            let klines: KLineData[]
-            if (klineMode === 'day') {
-                klines = await window.api.market.getKLine(code, klineDays)
-            } else if (klineMode === 'week') {
-                klines = await window.api.market.getWeeklyKLine(code, 60)
-            } else {
-                // 5min / 60min — use intraday with appropriate scale
-                const bars = klineMode === '5min' ? 78 : 360
-                klines = await window.api.market.getIntraday(code, bars)
-            }
+            const limit = klineMode === 'day' ? klineDays : PERIOD_BARS[klineMode] ?? 240
+            const result = await window.api.market.getKLineEx(code, klineMode, adjust, limit)
+            const klines = result.bars
+            setKlineMeta({ source: result.source, adjust: result.adjust })
             const [q, holdings] = await Promise.all([
                 window.api.market.getQuote(code),
                 window.api.holdings.getAll(),
@@ -215,68 +222,28 @@ export default function StockDetail() {
         }
     }
 
-    async function handleReadKLine() {
-        if (!code || !quote || klineData.length === 0) return
-        setKlineReadLoading(true)
-        setKlineReadError(null)
-        try {
-            const result = await window.api.ai.readKLine({
-                code,
-                name,
-                currentPrice: quote.price,
-                changePercent: quote.changePercent,
-                klines: klineData,
-            })
-            setKlineReading(result.content)
-        } catch (e) {
-            setKlineReadError(e instanceof Error ? e.message : String(e))
-        } finally {
-            setKlineReadLoading(false)
-        }
+    function toggleOverlay(key: keyof Overlays) {
+        setOverlays((prev) => {
+            const next = { ...prev, [key]: !prev[key] }
+            localStorage.setItem('kline_overlays', JSON.stringify(next))
+            return next
+        })
     }
 
-    async function handleTradingT() {
-        if (!code || !quote) return
-        setTradingTLoading(true)
-        setTradingTError(null)
-        setTradingTResult(null)
-        try {
-            const intraday = await window.api.market.getIntraday(code, 48)
-            const result = await window.api.ai.tradingT({
-                code,
-                name,
-                costPrice: holding?.cost_price ?? 0,
-                holdQuantity: holding?.quantity ?? 0,
-                currentPrice: quote.price,
-                changePercent: quote.changePercent,
-                todayOpen: quote.open,
-                todayHigh: quote.high,
-                todayLow: quote.low,
-                intraday,
-            })
-            setTradingTResult(result.content)
-        } catch (e) {
-            setTradingTError(e instanceof Error ? e.message : String(e))
-        } finally {
-            setTradingTLoading(false)
-        }
+    function changeAdjust(a: AdjustType) {
+        localStorage.setItem('kline_adjust', a)
+        setAdjust(a)
     }
 
-    function handleModeClick(mode: KLineMode) {
-        setKlineMode(mode)
-        if (mode === 'day' && klineDays === 60) {
-            // same, will re-trigger via useEffect
-        }
+    async function addToSignalPool() {
+        if (!code) return
+        const added = await window.api.signals.addWatch([{ code, name }])
+        setWatchMsg(added > 0 ? '已加入监控池，正在回填历史信号' : '已在监控池中')
+        setTimeout(() => setWatchMsg(''), 3000)
     }
 
-    const klineTitle =
-        klineMode === 'week'
-            ? `${name} 周K线图`
-            : klineMode === '5min'
-              ? `${name} 5分钟K线图`
-              : klineMode === '60min'
-                ? `${name} 60分钟K线图`
-                : `${name} K线图`
+    const periodLabel = PERIODS.find((p) => p.id === klineMode)?.label ?? ''
+    const klineTitle = `${name} ${periodLabel}${klineMeta ? ` · ${ADJUST_TEXT[klineMeta.adjust]}` : ''}`
 
     return (
         <div className="page">
@@ -296,6 +263,30 @@ export default function StockDetail() {
                         </div>
                     )}
                 </div>
+                <button
+                    className="btn-secondary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    onClick={() => setShowAlert(true)}
+                >
+                    🔔 提醒
+                </button>
+                <button
+                    className="btn-secondary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    title="加入技术信号监控池：盘中出现金叉/突破等买卖点时提醒"
+                    onClick={addToSignalPool}
+                >
+                    {watchMsg || '📈 盯信号'}
+                </button>
+                <button
+                    className="btn-secondary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    onClick={() =>
+                        navigate(`/chat?q=${encodeURIComponent(`帮我全面分析一下 ${name}（${code}）：技术面、基本面、资金面和主要风险`)}`)
+                    }
+                >
+                    ✨ 问小墨鱼
+                </button>
                 <button
                     className="btn-secondary"
                     style={{ whiteSpace: 'nowrap' }}
@@ -328,19 +319,13 @@ export default function StockDetail() {
 
             <div className="kline-controls">
                 <span className="kline-mode-label">周期：</span>
-                {(['5min', '60min', 'day', 'week'] as KLineMode[]).map((m) => (
+                {PERIODS.map((p) => (
                     <button
-                        key={m}
-                        className={`btn-day ${klineMode === m ? 'active' : ''}`}
-                        onClick={() => handleModeClick(m)}
+                        key={p.id}
+                        className={`btn-day ${klineMode === p.id ? 'active' : ''}`}
+                        onClick={() => setKlineMode(p.id)}
                     >
-                        {m === 'day'
-                            ? '日K'
-                            : m === 'week'
-                              ? '周K'
-                              : m === '5min'
-                                ? '5分钟'
-                                : '60分钟'}
+                        {p.label}
                     </button>
                 ))}
                 {klineMode === 'day' && (
@@ -357,9 +342,75 @@ export default function StockDetail() {
                         ))}
                     </>
                 )}
+                <span style={{ margin: '0 4px', opacity: 0.4 }}>|</span>
+                {(['qfq', 'none', 'hfq'] as AdjustType[]).map((a) => (
+                    <button
+                        key={a}
+                        className={`btn-day ${adjust === a ? 'active' : ''}`}
+                        title={
+                            a === 'qfq'
+                                ? '前复权：以最新价为基准，把历史价格按分红送股调低，看形态、画线用这个'
+                                : a === 'hfq'
+                                  ? '后复权：以上市价为基准往后累加，能看出真实的长期涨幅'
+                                  : '不复权：交易所真实成交价，除权日会出现跳空缺口'
+                        }
+                        onClick={() => changeAdjust(a)}
+                    >
+                        {ADJUST_TEXT[a]}
+                    </button>
+                ))}
+                {klineMeta && klineMeta.adjust !== adjust && (
+                    <span className="kline-source-warn" title="东财数据源暂不可用，已降级到新浪（仅提供不复权数据）">
+                        ⚠ 备用源仅支持不复权
+                    </span>
+                )}
+            </div>
+            <div className="kline-controls">
+                <span className="kline-mode-label">副图：</span>
+                {(['MACD', 'KDJ', 'RSI'] as SubIndicator[]).map((ind) => (
+                    <button
+                        key={ind}
+                        className={`btn-day ${subIndicator === ind ? 'active' : ''}`}
+                        onClick={() => setSubIndicator(ind)}
+                    >
+                        {ind}
+                    </button>
+                ))}
+                <span style={{ margin: '0 4px', opacity: 0.4 }}>|</span>
+                <span className="kline-mode-label">叠加：</span>
+                {OVERLAY_ITEMS.map((o) => (
+                    <button
+                        key={o.key}
+                        className={`btn-day ${overlays[o.key] ? 'active' : ''}`}
+                        title={o.title}
+                        onClick={() => toggleOverlay(o.key)}
+                    >
+                        {o.label}
+                    </button>
+                ))}
+                {holding && (
+                    <button
+                        className={`btn-day ${showMyTrades ? 'active' : ''}`}
+                        title="在图上标出成本线和自己的买卖点"
+                        onClick={() => setShowMyTrades((v) => !v)}
+                    >
+                        我的成本/买卖点
+                    </button>
+                )}
             </div>
 
-            <KLineChart data={klineData} title={klineTitle} />
+            <KLineChart
+                data={klineData}
+                title={klineTitle}
+                subIndicator={subIndicator}
+                overlays={overlays}
+                period={klineMode}
+                code={code}
+                name={name}
+                drawingKey={code ? `${code}|${klineMode}` : undefined}
+                costPrice={showMyTrades && holding ? holding.avg_cost_price ?? holding.cost_price : null}
+                trades={showMyTrades && klineMode === 'day' ? holding?.trades : undefined}
+            />
 
             {loadError && (
                 <div className="error-msg" style={{ margin: '12px 0' }}>
@@ -370,92 +421,13 @@ export default function StockDetail() {
                 </div>
             )}
 
-            {klineData.length > 0 && (
-                <div className="kline-ai-section">
-                    <div className="kline-ai-header">
-                        <h3>📈 AI 帮你看K线</h3>
-                        <button
-                            className="btn-secondary"
-                            onClick={handleReadKLine}
-                            disabled={klineReadLoading || !quote}
-                        >
-                            {klineReadLoading ? '解读中...' : '用大白话解读'}
-                        </button>
-                    </div>
-                    {klineReadError && <div className="error-msg">{klineReadError}</div>}
-                    {klineReading && (
-                        <div className="kline-reading markdown-body">
-                            <button
-                                className="btn-copy"
-                                onClick={() =>
-                                    navigator.clipboard.writeText(klineReading).catch(() => {})
-                                }
-                            >
-                                复制
-                            </button>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{klineReading}</ReactMarkdown>
-                        </div>
-                    )}
-                    {!klineReading && !klineReadLoading && !klineReadError && (
-                        <div className="kline-reading-hint">
-                            点击上方按钮，AI
-                            用大白话告诉你：这张K线图在说什么、现在处于什么位置、新手怎么看。
-                        </div>
-                    )}
+            {code && (
+                <div id="backtest">
+                    <BacktestPanel code={code} name={name} />
                 </div>
             )}
 
-            <div className="kline-ai-section">
-                <div className="kline-ai-header">
-                    <h3>⚡ AI 帮你做T</h3>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        {holding && (
-                            <span className="holding-tag">
-                                持仓 {holding.quantity} 股 @ {holding.cost_price}
-                            </span>
-                        )}
-                        <button
-                            className="btn-secondary"
-                            onClick={handleTradingT}
-                            disabled={tradingTLoading || !quote}
-                        >
-                            {tradingTLoading ? '分析中...' : '获取做T步骤'}
-                        </button>
-                    </div>
-                </div>
-                {tradingTError && <div className="error-msg">{tradingTError}</div>}
-                {tradingTResult && (
-                    <div className="kline-reading markdown-body">
-                        <button
-                            className="btn-copy"
-                            onClick={() =>
-                                navigator.clipboard.writeText(tradingTResult).catch(() => {})
-                            }
-                        >
-                            复制
-                        </button>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{tradingTResult}</ReactMarkdown>
-                    </div>
-                )}
-                {!tradingTResult && !tradingTLoading && !tradingTError && (
-                    <div className="kline-reading-hint">
-                        基于5分钟K线 + MACD，AI 给出今日做T的具体价格和步骤。
-                        {holding
-                            ? `当前持仓 ${holding.quantity} 股，自动按持仓做T分析。`
-                            : '未持仓，按空仓波段做T分析。'}
-                    </div>
-                )}
-            </div>
-
-            {quote && (
-                <BuyAdvicePanel
-                    price={quote.price}
-                    changePercent={quote.changePercent}
-                    dailyKlines={dailyContextKlines}
-                    weeklyKlines={weeklyContextKlines}
-                    monthlyKlines={monthlyContextKlines}
-                />
-            )}
+            {code && <StockNewsPanel code={code} name={name} />}
 
             {fundamentals && <FundamentalsCard f={fundamentals} />}
 
@@ -498,6 +470,9 @@ export default function StockDetail() {
                         </div>
                     )}
                 </div>
+            )}
+            {showAlert && code && (
+                <AlertModal code={code} name={name} price={quote?.price} onClose={() => setShowAlert(false)} />
             )}
         </div>
     )

@@ -1,8 +1,12 @@
 import { app, BrowserWindow, shell, Menu, ipcMain } from 'electron'
 import { join } from 'path'
 import { registerAllIpcHandlers } from './ipc'
-import { initDatabase } from './db'
+import { initDatabase, flush } from './db'
 import { startScheduler } from './services/scheduler'
+import { startAlertMonitor } from './services/alerts'
+import { startSignalMonitor } from './services/signalMonitor'
+import { startAutoUpdateCheck } from './services/updater'
+import { startDataSourceMonitor } from './services/dataSource'
 
 // 必须在 app.whenReady() 之前设置，否则 dev 模式下 Electron 会用 package.json 的 name
 // (stock-mind) 作为 userData，导致 Local Storage / Session Storage 等落到 stock-mind 目录，
@@ -10,6 +14,14 @@ import { startScheduler } from './services/scheduler'
 app.setName('com.stockmind.app')
 if (process.platform === 'win32') {
     app.setAppUserModelId('com.stockmind.app')
+}
+
+// 开发态下父终端退出后 stdout/stderr 管道会断开，此时任何 console 输出都会抛
+// EPIPE/EIO 并被 Electron 当成主进程未捕获异常弹窗。这类写失败对应用本身无影响，忽略即可。
+for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (e: NodeJS.ErrnoException) => {
+        if (e.code !== 'EPIPE' && e.code !== 'EIO') throw e
+    })
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -46,6 +58,18 @@ function createWindow(): void {
     window.webContents.setWindowOpenHandler((details) => {
         shell.openExternal(details.url)
         return { action: 'deny' }
+    })
+
+    // Cmd/Ctrl+R 默认会整页重载（丢前端状态、重连行情源，比较重）。这里拦下来，改成通知
+    // 渲染层“只刷新当前页数据”。保留 Cmd/Ctrl+Shift+R 作为开发时的强制重载。
+    window.webContents.on('before-input-event', (event, input) => {
+        if (input.type !== 'keyDown') return
+        const isReload =
+            (input.meta || input.control) && !input.shift && !input.alt && input.key.toLowerCase() === 'r'
+        if (isReload) {
+            event.preventDefault()
+            window.webContents.send('app:refresh')
+        }
     })
 
     if (process.env['ELECTRON_RENDERER_URL']) {
@@ -195,15 +219,37 @@ ipcMain.handle('pet:resize', (_e, width: number, height: number) => {
 
 app.whenReady().then(async () => {
     await initDatabase()
+    startDataSourceMonitor()
     registerAllIpcHandlers()
     startScheduler()
     createWindow()
     createPetWindow()
+    startAlertMonitor({
+        openRoute: (route) => showMainWindow(route),
+        sendToPet: (message) => petWindow?.webContents.send('pet:state', { type: 'surprised', message }),
+    })
+    startSignalMonitor({
+        openRoute: (route) => showMainWindow(route),
+        sendToPet: (message) => petWindow?.webContents.send('pet:state', { type: 'surprised', message }),
+    })
+    startAutoUpdateCheck()
+
+    // 数据库采用延迟批量落盘，这里做两道兜底：每 20 秒落盘一次，退出前再强制落盘一次，
+    // 把异常退出（被强杀/断电）可能丢失的写入控制在最近 20 秒内。
+    setInterval(() => flush(), 20_000)
 
     app.on('activate', function () {
         showMainWindow()
         if (petEnabled) createPetWindow()
     })
+})
+
+app.on('before-quit', () => {
+    try {
+        flush()
+    } catch (e) {
+        console.error('[app] 退出前落盘失败:', e)
+    }
 })
 
 app.on('window-all-closed', () => {

@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'crypto'
 import {
     getAllHoldings,
@@ -22,7 +22,6 @@ import {
     getInvestorProfile,
     updateInvestorProfile,
     formatInvestorProfile,
-    formatInvestorProfileFull,
     saveAnalysis,
     getAnalysesForStock,
     saveDecision,
@@ -30,6 +29,8 @@ import {
     getDecisionById,
     getPickReviewsByDecisionId,
     getDecisionStats,
+    getDecisionScorecard,
+    getDbPath,
     deleteDecision,
     listChatSessions,
     createChatSession,
@@ -39,11 +40,32 @@ import {
     listChatMessages,
     appendChatMessage,
     deleteChatMessage,
+    listPriceAlerts,
+    addPriceAlert,
+    setPriceAlertEnabled,
+    deletePriceAlert,
+    listAlertEvents,
+    countUnreadAlertEvents,
+    markAlertEventsRead,
+    clearAlertEvents,
+    listSignalWatch,
+    addSignalWatch,
+    updateSignalWatch,
+    removeSignalWatch,
+    listSignalEvents,
+    countUnreadSignalEvents,
+    markSignalEventsRead,
+    clearSignalEvents,
+    type SignalEventQuery,
+    type PriceAlertKind,
 } from '../db'
 import {
     fetchQuote,
     fetchBatchQuotes,
     fetchKLine,
+    fetchKLineEx,
+    type KLinePeriod,
+    type AdjustType,
     fetchWeeklyKLine,
     fetchMonthlyKLine,
     fetchIntraday,
@@ -60,6 +82,24 @@ import {
 } from '../services/market'
 import { fetchCapitalFlowDaily, fetchMarketFlowSnapshot, fetchDailyKLine, fetchSectorCapitalFlow } from '../services/capitalFlow'
 import { fetchFundamentals } from '../services/fundamentals'
+import { fetchIndexTicker, fetchMarketBreadth, fetchSectorHeatmap, fetchNewsFlash } from '../services/marketOverview'
+import { assessMarketRegime } from '../services/marketRegime'
+import { checkPriceAlerts, setTrayEnabled } from '../services/alerts'
+import { getPush2Status, probePush2 } from '../services/dataSource'
+import { runBacktest, STRATEGIES, type StrategyId } from '../services/backtest'
+import { BUILTIN_PRESETS, cancelScreener, runScreener, type ScreenerCriteria } from '../services/screener'
+import { PATTERNS, SIGNALS } from '../services/patterns'
+import { computeSignalStats, getSignalDefaults, MONITOR_PERIODS, scanSignals, type SignalHooks } from '../services/signalMonitor'
+import { checkForUpdates, downloadUpdate, getUpdateState, installUpdate, openReleasePage } from '../services/updater'
+import {
+    exportBackupJson,
+    exportDbFile,
+    exportHoldingsCsv,
+    exportTradesCsv,
+    importBackupJson,
+} from '../services/backup'
+import { computePortfolioAnalytics } from '../services/portfolioAnalytics'
+import { fetchStockNews, fetchStockNotices, tagNewsSentiment } from '../services/stockNews'
 import {
     callAI,
     buildStockAnalysisPrompt,
@@ -87,6 +127,7 @@ function getConfiguredAI() {
             apiKey: envKey,
             baseUrl: process.env.AI_BASE_URL?.trim() || undefined,
             model: process.env.AI_MODEL?.trim() || undefined,
+            fastModel: process.env.AI_FAST_MODEL?.trim() || undefined,
         }
     }
 
@@ -98,12 +139,14 @@ function getConfiguredAI() {
         }
         const baseUrl = getSetting('ai_custom_base_url')?.trim() || undefined
         const model = getSetting('ai_custom_model')?.trim() || undefined
+        const fastModel = getSetting('ai_custom_fast_model')?.trim() || undefined
         console.log(`[AI] 使用自定义中转 model=${model || '(默认)'} baseUrl=${baseUrl || '(默认)'}`)
         return {
             provider: 'openai' as AIProvider,
             apiKey,
             baseUrl,
             model,
+            fastModel,
         }
     }
 
@@ -114,8 +157,9 @@ function getConfiguredAI() {
     }
     const baseUrl = getSetting(`ai_base_url_${provider}`)?.trim() || undefined
     const model = getSetting(`ai_model_${provider}`)?.trim() || undefined
+    const fastModel = getSetting(`ai_fast_model_${provider}`)?.trim() || undefined
     console.log(`[AI] 使用供应商=${provider} model=${model || '(默认)'} baseUrl=${baseUrl || '(默认)'}`)
-    return { provider, apiKey, baseUrl, model }
+    return { provider, apiKey, baseUrl, model, fastModel }
 }
 
 function formatChatError(error: unknown): string {
@@ -218,6 +262,12 @@ export function registerAllIpcHandlers(): void {
 
     ipcMain.handle('market:getKLine', (_e, code: string, days: number) => fetchKLine(code, days))
 
+    ipcMain.handle(
+        'market:getKLineEx',
+        (_e, code: string, period?: KLinePeriod, adjust?: AdjustType, limit?: number) =>
+            fetchKLineEx(code, period ?? 'day', adjust ?? 'qfq', limit ?? 120)
+    )
+
     ipcMain.handle('market:getWeeklyKLine', (_e, code: string, weeks: number) =>
         fetchWeeklyKLine(code, weeks ?? 60)
     )
@@ -275,6 +325,181 @@ export function registerAllIpcHandlers(): void {
     )
 
     ipcMain.handle('market:getMarketFlowSnapshot', () => fetchMarketFlowSnapshot())
+
+    ipcMain.handle('alerts:list', () => listPriceAlerts())
+    ipcMain.handle(
+        'alerts:add',
+        (
+            _e,
+            input: {
+                code: string
+                name: string
+                kind: PriceAlertKind
+                target: number
+                note?: string
+                source?: string
+                repeatDaily?: boolean
+            }
+        ) => addPriceAlert(input)
+    )
+    ipcMain.handle('alerts:setEnabled', (_e, id: number, enabled: boolean) => setPriceAlertEnabled(id, enabled))
+    ipcMain.handle('alerts:delete', (_e, id: number) => deletePriceAlert(id))
+    ipcMain.handle('alerts:events', (_e, limit?: number) => listAlertEvents(limit ?? 100))
+    ipcMain.handle('alerts:unreadCount', () => countUnreadAlertEvents())
+    ipcMain.handle('alerts:markRead', () => markAlertEventsRead())
+    ipcMain.handle('alerts:clearEvents', () => clearAlertEvents())
+    ipcMain.handle('alerts:checkNow', () =>
+        checkPriceAlerts(
+            {
+                openRoute: () => {},
+                sendToPet: () => {},
+            },
+            true
+        )
+    )
+
+    // --- 条件选股 ---
+    ipcMain.handle('screener:meta', () => ({ patterns: PATTERNS, presets: BUILTIN_PRESETS }))
+    ipcMain.handle('screener:run', (e, criteria: ScreenerCriteria, requestId?: string) =>
+        runScreener(criteria, {
+            requestId,
+            onProgress: (p) => {
+                if (!e.sender.isDestroyed()) e.sender.send('screener:progress', { requestId, ...p })
+            },
+        })
+    )
+    ipcMain.handle('screener:cancel', (_e, requestId: string) => cancelScreener(requestId))
+
+    // --- 技术信号监控 ---
+    const silentHooks: SignalHooks = { openRoute: () => {}, sendToPet: () => {} }
+    ipcMain.handle('signals:meta', () => ({ signals: SIGNALS, periods: MONITOR_PERIODS, defaults: getSignalDefaults() }))
+    ipcMain.handle('signals:listWatch', () => listSignalWatch())
+    ipcMain.handle(
+        'signals:addWatch',
+        (_e, items: Array<{ code: string; name: string }>, periods?: string, signals?: string) => {
+            const added = addSignalWatch(items, periods ?? '', signals ?? '')
+            // 新加入的票回填最近的历史信号，让收益统计马上有样本（异步，不阻塞界面）
+            const codes = new Set(items.map((i) => i.code))
+            const ids = listSignalWatch()
+                .filter((w) => codes.has(w.code))
+                .map((w) => w.id)
+            void scanSignals(silentHooks, { force: true, backfill: true, watchIds: ids })
+            return added
+        }
+    )
+    ipcMain.handle(
+        'signals:updateWatch',
+        (_e, id: number, patch: { periods?: string; signals?: string; enabled?: boolean; note?: string }) => {
+            updateSignalWatch(id, patch)
+            // 改了周期或信号，用新配置回填一次
+            if (patch.periods !== undefined || patch.signals !== undefined) {
+                void scanSignals(silentHooks, { force: true, backfill: true, watchIds: [id] })
+            }
+        }
+    )
+    ipcMain.handle('signals:removeWatch', (_e, id: number) => removeSignalWatch(id))
+    ipcMain.handle('signals:setDefaults', (_e, d: { periods?: string[]; signals?: string[]; enabled?: boolean }) => {
+        if (d.periods) setSetting('signal_default_periods', d.periods.join(','))
+        if (d.signals) setSetting('signal_default_signals', d.signals.join(','))
+        if (d.enabled !== undefined) setSetting('signal_monitor_enabled', d.enabled ? '1' : '0')
+        return getSignalDefaults()
+    })
+    ipcMain.handle('signals:scanNow', () => scanSignals(silentHooks, { force: true }))
+    ipcMain.handle('signals:backfill', () => scanSignals(silentHooks, { force: true, backfill: true }))
+    ipcMain.handle('signals:events', (_e, q?: SignalEventQuery) => listSignalEvents(q ?? {}))
+    ipcMain.handle('signals:unreadCount', () => countUnreadSignalEvents())
+    ipcMain.handle('signals:markRead', () => markSignalEventsRead())
+    ipcMain.handle('signals:clearEvents', () => clearSignalEvents())
+    ipcMain.handle('signals:stats', (_e, q?: { since?: string; code?: string; period?: string }) =>
+        computeSignalStats(q ?? {})
+    )
+
+    // --- 自动更新 ---
+    ipcMain.handle('updater:getState', () => getUpdateState())
+    ipcMain.handle('updater:check', () => checkForUpdates())
+    ipcMain.handle('updater:download', () => downloadUpdate())
+    ipcMain.handle('updater:install', () => installUpdate())
+    ipcMain.handle('updater:openReleases', () => openReleasePage())
+    // --- 数据备份与导出 ---
+    const stamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
+
+    ipcMain.handle(
+        'backup:export',
+        async (_e, kind: 'json' | 'db' | 'holdings-csv' | 'trades-csv', includeChat?: boolean) => {
+            const presets = {
+                json: { name: `stockmind-backup-${stamp()}.json`, filters: [{ name: 'JSON 备份', extensions: ['json'] }] },
+                db: { name: `stockmind-${stamp()}.db`, filters: [{ name: '数据库文件', extensions: ['db'] }] },
+                'holdings-csv': { name: `持仓-${stamp()}.csv`, filters: [{ name: 'CSV 表格', extensions: ['csv'] }] },
+                'trades-csv': { name: `交易流水-${stamp()}.csv`, filters: [{ name: 'CSV 表格', extensions: ['csv'] }] },
+            }[kind]
+            const { canceled, filePath } = await dialog.showSaveDialog({
+                title: '保存到',
+                defaultPath: presets.name,
+                filters: presets.filters,
+            })
+            if (canceled || !filePath) return { canceled: true as const }
+            if (kind === 'json') return { canceled: false as const, ...exportBackupJson(filePath, !!includeChat) }
+            if (kind === 'db') return { canceled: false as const, ...exportDbFile(filePath) }
+            if (kind === 'holdings-csv') return { canceled: false as const, ...exportHoldingsCsv(filePath) }
+            return { canceled: false as const, ...exportTradesCsv(filePath) }
+        }
+    )
+
+    ipcMain.handle('backup:import', async () => {
+        const { canceled, filePaths } = await dialog.showOpenDialog({
+            title: '选择 StockMind JSON 备份',
+            properties: ['openFile'],
+            filters: [{ name: 'JSON 备份', extensions: ['json'] }],
+        })
+        if (canceled || filePaths.length === 0) return { canceled: true as const }
+
+        const confirm = await dialog.showMessageBox({
+            type: 'warning',
+            buttons: ['取消', '覆盖导入'],
+            defaultId: 0,
+            cancelId: 0,
+            title: '确认导入备份',
+            message: '导入会用备份内容覆盖当前数据',
+            detail:
+                '持仓、交易流水、自选、提醒、决策历史与战绩都会被备份里的内容替换。\n' +
+                '导入前会自动把当前数据库另存为 stockmind.db.before-restore 兜底。\n' +
+                '导入完成后请重启应用。',
+        })
+        if (confirm.response !== 1) return { canceled: true as const }
+
+        return { canceled: false as const, ...importBackupJson(filePaths[0]) }
+    })
+
+    ipcMain.handle('backup:revealDataDir', async () => {
+        shell.showItemInFolder(getDbPath())
+        return true
+    })
+
+    ipcMain.handle('app:dataSourceStatus', () => getPush2Status())
+    ipcMain.handle('app:probeDataSource', async () => {
+        await probePush2(true)
+        return getPush2Status()
+    })
+    ipcMain.handle('app:setTrayEnabled', (_e, enabled: boolean) => setTrayEnabled(enabled))
+
+    ipcMain.handle('stock:news', (_e, code: string, count?: number) => fetchStockNews(code, count ?? 20))
+    ipcMain.handle('stock:notices', (_e, code: string, count?: number) => fetchStockNotices(code, count ?? 20))
+    ipcMain.handle(
+        'stock:tagSentiment',
+        (
+            _e,
+            stock: { code: string; name: string },
+            items: Array<{ id: string; title: string; summary?: string }>
+        ) => tagNewsSentiment(getConfiguredAI(), stock, items)
+    )
+
+    ipcMain.handle('portfolio:analytics', (_e, days?: number) => computePortfolioAnalytics(days ?? 250))
+
+    ipcMain.handle('market:getIndexTicker', () => fetchIndexTicker())
+    ipcMain.handle('market:getBreadth', () => fetchMarketBreadth())
+    ipcMain.handle('market:getSectorHeatmap', (_e, topN?: number) => fetchSectorHeatmap(topN ?? 60))
+    ipcMain.handle('market:getNewsFlash', (_e, count?: number) => fetchNewsFlash(count ?? 30))
+    ipcMain.handle('market:getRegime', () => assessMarketRegime())
 
     ipcMain.handle('market:getSectorTopStocks', (_e, bkCode: string, topN?: number) =>
         fetchSectorTopStocks(bkCode, topN ?? 8)
@@ -482,10 +707,12 @@ export function registerAllIpcHandlers(): void {
                 capital?: number
                 riskLevel?: string
                 requestId?: string
+                debateRounds?: number
             }
         ) => {
-            const { provider, apiKey, baseUrl, model } = getConfiguredAI()
-            const profile = getInvestorProfile()
+            const { provider, apiKey, baseUrl, model, fastModel } = getConfiguredAI()
+            const configuredRounds = Number(getSetting('agent_debate_rounds') ?? '1')
+            const debateRounds = payload.debateRounds ?? (Number.isFinite(configuredRounds) ? configuredRounds : 1)
             const requestId = payload.requestId
             const output = await runDecisionAgent(
                 {
@@ -493,11 +720,12 @@ export function registerAllIpcHandlers(): void {
                     apiKey,
                     baseUrl,
                     model,
+                    fastModel,
                     date: payload.date,
                     candidateCodes: payload.candidateCodes,
                     capital: payload.capital,
                     riskLevel: payload.riskLevel,
-                    userProfile: formatInvestorProfileFull(profile),
+                    debateRounds,
                 },
                 // 逐节点进度回调 → 推送给渲染层做实时提示
                 (progress) => {
@@ -532,6 +760,24 @@ export function registerAllIpcHandlers(): void {
     })
 
     ipcMain.handle('decision:stats', (_e, days?: number) => getDecisionStats(days ?? 30))
+
+    ipcMain.handle('decision:scorecard', (_e, days?: number) => getDecisionScorecard(days ?? 90))
+
+    // --- 策略回测 ---
+    ipcMain.handle('backtest:strategies', () => STRATEGIES)
+    ipcMain.handle(
+        'backtest:run',
+        (
+            _e,
+            input: {
+                code: string
+                name: string
+                strategy: StrategyId
+                params?: Record<string, number>
+                days?: number
+            }
+        ) => runBacktest(input)
+    )
 
     ipcMain.handle('decision:review', async (_e, decisionId?: number) => {
         if (decisionId != null) return reviewDecision(decisionId)

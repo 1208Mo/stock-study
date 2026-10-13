@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useSettingsStore } from '../stores/settingsStore'
 import type { AIProvider } from '../stores/settingsStore'
+import type { DataSourceStatus } from '../types'
 import type { InvestorProfile } from '../types'
+import UpdateSection from '../components/UpdateSection'
 
 const THEMES: { id: string; label: string; sidebar: string; main: string; primary: string }[] = [
     { id: 'dark', label: '深色', sidebar: '#12151f', main: '#0f1117', primary: '#4f8ef7' },
@@ -70,6 +72,9 @@ const PROVIDERS: {
     },
 ]
 
+/** 长期投资记忆面板暂时隐藏；后台仍按已存的画像注入 Agent */
+const SHOW_INVESTOR_PROFILE = false
+
 const EMPTY_PROFILE: InvestorProfile = {
     capital: 7000,
     riskLevel: '平衡',
@@ -85,16 +90,19 @@ export default function Settings() {
         aiProvider,
         apiKeys,
         aiModels,
+        aiFastModels,
         aiBaseUrls,
         useCustomAI,
         customBaseUrl,
         customModel,
+        customFastModel,
         customKey,
         loaded,
         loadSettings,
         saveAIProvider,
         saveAPIKey,
         saveAIModel,
+        saveAIFastModel,
         saveAIBaseUrl,
         saveCustomAI,
     } = useSettingsStore()
@@ -117,6 +125,14 @@ export default function Settings() {
         volcengine: '',
         zhipu: '',
     })
+    const [localFastModels, setLocalFastModels] = useState<Record<AIProvider, string>>({
+        openai: '',
+        deepseek: '',
+        qwen: '',
+        ernie: '',
+        volcengine: '',
+        zhipu: '',
+    })
     const [localBaseUrls, setLocalBaseUrls] = useState<Record<AIProvider, string>>({
         openai: '',
         deepseek: '',
@@ -128,9 +144,61 @@ export default function Settings() {
     const [localUseCustom, setLocalUseCustom] = useState(false)
     const [localCustomBaseUrl, setLocalCustomBaseUrl] = useState('')
     const [localCustomModel, setLocalCustomModel] = useState('')
+    const [localCustomFastModel, setLocalCustomFastModel] = useState('')
     const [localCustomKey, setLocalCustomKey] = useState('')
     const [showCustomKey, setShowCustomKey] = useState(false)
     const [currentTheme, setCurrentTheme] = useState(() => localStorage.getItem('theme') || 'dark')
+    const [trayEnabled, setTrayEnabled] = useState(true)
+    const [sourceStatus, setSourceStatus] = useState<DataSourceStatus | null>(null)
+    const [probing, setProbing] = useState(false)
+    const [debateRounds, setDebateRounds] = useState(1)
+    const [backupMsg, setBackupMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+    const [backupBusy, setBackupBusy] = useState(false)
+    const [includeChat, setIncludeChat] = useState(false)
+
+    const runExport = async (kind: 'json' | 'db' | 'holdings-csv' | 'trades-csv') => {
+        setBackupBusy(true)
+        setBackupMsg(null)
+        try {
+            const r = await window.api.backup.export(kind, includeChat)
+            if (r.canceled) return
+            const extra =
+                r.rows !== undefined
+                    ? kind === 'json'
+                      ? `（${r.tables} 张表、${r.rows} 行）`
+                      : `（${r.rows} 行）`
+                    : ''
+            setBackupMsg({ type: 'ok', text: `已导出到 ${r.path}${extra}` })
+        } catch (e) {
+            setBackupMsg({ type: 'err', text: `导出失败：${e instanceof Error ? e.message : String(e)}` })
+        } finally {
+            setBackupBusy(false)
+        }
+    }
+
+    const runImport = async () => {
+        setBackupBusy(true)
+        setBackupMsg(null)
+        try {
+            const r = await window.api.backup.import()
+            if (r.canceled) return
+            setBackupMsg({
+                type: 'ok',
+                text: `已恢复 ${r.restored.length} 张表、${r.rows} 行${r.exportedAt ? `（备份时间 ${r.exportedAt.slice(0, 19).replace('T', ' ')}）` : ''}。请重启应用使所有页面重新加载。`,
+            })
+        } catch (e) {
+            setBackupMsg({ type: 'err', text: `导入失败：${e instanceof Error ? e.message : String(e)}` })
+        } finally {
+            setBackupBusy(false)
+        }
+    }
+    useEffect(() => {
+        window.api.settings.get('tray_enabled').then((v) => setTrayEnabled(v !== '0'))
+        window.api.settings
+            .get('agent_debate_rounds')
+            .then((v) => setDebateRounds(Math.min(3, Math.max(1, Number(v) || 1))))
+        window.api.app.dataSourceStatus().then(setSourceStatus).catch(() => {})
+    }, [])
     const [showKey, setShowKey] = useState<Record<AIProvider, boolean>>({
         openai: false,
         deepseek: false,
@@ -153,12 +221,25 @@ export default function Settings() {
         setLocalProvider(aiProvider)
         setLocalKeys(apiKeys)
         setLocalModels(aiModels)
+        setLocalFastModels(aiFastModels)
         setLocalBaseUrls(aiBaseUrls)
         setLocalUseCustom(useCustomAI)
         setLocalCustomBaseUrl(customBaseUrl)
         setLocalCustomModel(customModel)
+        setLocalCustomFastModel(customFastModel)
         setLocalCustomKey(customKey)
-    }, [aiProvider, apiKeys, aiModels, aiBaseUrls, useCustomAI, customBaseUrl, customModel, customKey])
+    }, [
+        aiProvider,
+        apiKeys,
+        aiModels,
+        aiFastModels,
+        aiBaseUrls,
+        useCustomAI,
+        customBaseUrl,
+        customModel,
+        customFastModel,
+        customKey,
+    ])
 
     // 仅在初始加载完成时设置展开状态，后续不强制重置，保持用户当前的展开选择
     // 这样编辑非当前选中的模型时，卡片不会被自动折叠
@@ -229,6 +310,20 @@ export default function Settings() {
     useEffect(() => {
         if (!loaded) return
         const debounce = setTimeout(async () => {
+            for (const p of Object.keys(localFastModels) as AIProvider[]) {
+                if (localFastModels[p] !== aiFastModels[p]) {
+                    setSaveStatus('saving')
+                    await saveAIFastModel(p, localFastModels[p])
+                    showSaveFeedback('快思考模型已保存')
+                }
+            }
+        }, 500)
+        return () => clearTimeout(debounce)
+    }, [localFastModels, aiFastModels, loaded, saveAIFastModel, showSaveFeedback])
+
+    useEffect(() => {
+        if (!loaded) return
+        const debounce = setTimeout(async () => {
             for (const p of Object.keys(localBaseUrls) as AIProvider[]) {
                 if (localBaseUrls[p] !== aiBaseUrls[p]) {
                     setSaveStatus('saving')
@@ -247,6 +342,7 @@ export default function Settings() {
                 localUseCustom !== useCustomAI ||
                 localCustomBaseUrl !== customBaseUrl ||
                 localCustomModel !== customModel ||
+                localCustomFastModel !== customFastModel ||
                 localCustomKey !== customKey
             ) {
                 setSaveStatus('saving')
@@ -254,6 +350,7 @@ export default function Settings() {
                     enabled: localUseCustom,
                     baseUrl: localCustomBaseUrl,
                     model: localCustomModel,
+                    fastModel: localCustomFastModel,
                     key: localCustomKey,
                 })
                 showSaveFeedback('自定义中转已保存')
@@ -264,10 +361,12 @@ export default function Settings() {
         localUseCustom,
         localCustomBaseUrl,
         localCustomModel,
+        localCustomFastModel,
         localCustomKey,
         useCustomAI,
         customBaseUrl,
         customModel,
+        customFastModel,
         customKey,
         loaded,
         saveCustomAI,
@@ -306,6 +405,132 @@ export default function Settings() {
                     )}
                 </div>
             </div>
+
+            <section className="settings-section">
+                <h2>每日决策 Agent</h2>
+                <div className="debate-rounds-row">
+                    <span>多空辩论轮数</span>
+                    {[1, 2, 3].map((n) => (
+                        <button
+                            key={n}
+                            className={`btn-day ${debateRounds === n ? 'active' : ''}`}
+                            onClick={async () => {
+                                setDebateRounds(n)
+                                await window.api.settings.set('agent_debate_rounds', String(n))
+                                showSaveFeedback('辩论轮数已保存')
+                            }}
+                        >
+                            {n} 轮
+                        </button>
+                    ))}
+                </div>
+                <p className="settings-note">
+                    1 轮 = 多头说一次 + 空头说一次。调到 2~3 轮后，双方会拿到对手的发言并逐条反驳，
+                    分歧点会被逼出来、决策更稳，代价是每多一轮多两次模型调用。
+                    辩论和裁决走主模型，所以轮数直接影响成本。
+                </p>
+            </section>
+
+            <section className="settings-section">
+                <h2>数据备份</h2>
+                <p className="settings-note">
+                    所有数据都存在本地一个 SQLite 文件里。其中 AI 战绩是靠时间一天天攒出来的，丢了无法重建，
+                    建议定期导出 JSON 备份。
+                </p>
+                <div className="backup-actions">
+                    <button className="btn-primary" disabled={backupBusy} onClick={() => runExport('json')}>
+                        导出 JSON 备份
+                    </button>
+                    <button className="btn-secondary" disabled={backupBusy} onClick={() => runExport('db')}>
+                        导出数据库文件
+                    </button>
+                    <button className="btn-secondary" disabled={backupBusy} onClick={() => runExport('holdings-csv')}>
+                        持仓 CSV
+                    </button>
+                    <button className="btn-secondary" disabled={backupBusy} onClick={() => runExport('trades-csv')}>
+                        交易流水 CSV
+                    </button>
+                    <button className="btn-secondary" disabled={backupBusy} onClick={runImport}>
+                        从 JSON 备份恢复
+                    </button>
+                    <button className="btn-small" onClick={() => window.api.backup.revealDataDir()}>
+                        打开数据目录
+                    </button>
+                </div>
+                <label className="alert-repeat">
+                    <input
+                        type="checkbox"
+                        checked={includeChat}
+                        onChange={(e) => setIncludeChat(e.target.checked)}
+                    />
+                    JSON 备份里包含 AI 对话记录（体积会明显变大，默认不含）
+                </label>
+                {backupMsg && (
+                    <div className={backupMsg.type === 'ok' ? 'backup-msg ok' : 'backup-msg err'}>
+                        {backupMsg.text}
+                    </div>
+                )}
+            </section>
+
+            <section className="settings-section">
+                <h2>数据源</h2>
+                <div className="source-row">
+                    <span className={`source-dot ${sourceStatus?.state ?? 'unknown'}`} />
+                    <span>
+                        东方财富（push2）：
+                        <strong>
+                            {sourceStatus?.state === 'ok'
+                                ? '可用'
+                                : sourceStatus?.state === 'down'
+                                  ? '不可用，已降级新浪'
+                                  : '检测中'}
+                        </strong>
+                    </span>
+                    {sourceStatus?.lastCheckedAt ? (
+                        <span className="dash-muted">
+                            {new Date(sourceStatus.lastCheckedAt).toLocaleTimeString('zh-CN')} 检测
+                        </span>
+                    ) : null}
+                    <button
+                        className="btn-small"
+                        disabled={probing}
+                        onClick={async () => {
+                            setProbing(true)
+                            try {
+                                setSourceStatus(await window.api.app.probeDataSource())
+                            } finally {
+                                setProbing(false)
+                            }
+                        }}
+                    >
+                        {probing ? '检测中…' : '重新检测'}
+                    </button>
+                </div>
+                <p className="settings-note">
+                    行情、K线、板块数据优先用东方财富（字段更全）。部分网络环境下东财会直接断开连接，
+                    这时会自动跳过它、改用新浪等备用源，避免每次请求都白等一次超时。每 10 分钟自动重试恢复。
+                </p>
+            </section>
+
+            <section className="settings-section">
+                <h2>通知与菜单栏</h2>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                        type="checkbox"
+                        checked={trayEnabled}
+                        onChange={async (e) => {
+                            setTrayEnabled(e.target.checked)
+                            await window.api.app.setTrayEnabled(e.target.checked)
+                        }}
+                    />
+                    <span>在 macOS 菜单栏显示持仓今日盈亏</span>
+                </label>
+                <p className="settings-note">
+                    交易时段每 30 秒刷新，点击菜单栏可查看涨跌最大的持仓。价格提醒在「提醒中心」管理。
+                </p>
+            </section>
+
+            <UpdateSection />
 
             {/* 主题色 */}
             <section className="settings-section">
@@ -359,6 +584,11 @@ export default function Settings() {
                 <p className="settings-note">
                     点击卡片切换模型，点击已选中的卡片展开/收起配置。Key 仅存储在本地。
                 </p>
+                <p className="settings-note">
+                    「快思考模型」用于每日决策里的数据归纳节点（市场摘要、技术/基本面/消息三位分析师），
+                    多空辩论和最终裁决仍用主模型。填一个便宜的小模型可以省掉一半以上 token，
+                    并行的分析师也会更快。留空则全部使用主模型。
+                </p>
 
                 {/* 自定义中转（OpenAI 兼容）：开启后全局忽略下方供应商选择 */}
                 <div className="provider-config-panel" style={{ marginBottom: 12 }}>
@@ -374,7 +604,7 @@ export default function Settings() {
                     </div>
                     <p className="settings-note">
                         开启后将忽略下方供应商选择，全局使用此中转。也可用环境变量
-                        AI_API_KEY / AI_BASE_URL / AI_MODEL 覆盖（优先级最高）。
+                        AI_API_KEY / AI_BASE_URL / AI_MODEL / AI_FAST_MODEL 覆盖（优先级最高）。
                     </p>
                     {localUseCustom && (
                         <div className="provider-config-panel-fields">
@@ -394,6 +624,15 @@ export default function Settings() {
                                     placeholder="gpt-5.6-sol"
                                     value={localCustomModel}
                                     onChange={(e) => setLocalCustomModel(e.target.value)}
+                                />
+                            </div>
+                            <div className="provider-field-row">
+                                <label>快思考模型</label>
+                                <input
+                                    className="input"
+                                    placeholder="留空＝与上面同一个模型"
+                                    value={localCustomFastModel}
+                                    onChange={(e) => setLocalCustomFastModel(e.target.value)}
                                 />
                             </div>
                             <div className="provider-field-row">
@@ -534,6 +773,20 @@ export default function Settings() {
                                 />
                             </div>
                             <div className="provider-field-row">
+                                <label>快思考模型</label>
+                                <input
+                                    className="input"
+                                    placeholder="留空＝与主模型相同"
+                                    value={localFastModels[expandedProvider]}
+                                    onChange={(e) =>
+                                        setLocalFastModels({
+                                            ...localFastModels,
+                                            [expandedProvider]: e.target.value,
+                                        })
+                                    }
+                                />
+                            </div>
+                            <div className="provider-field-row">
                                 <label>接口地址</label>
                                 <input
                                     className="input"
@@ -553,6 +806,7 @@ export default function Settings() {
             </section>
 
             {/* 长期投资记忆 */}
+            {SHOW_INVESTOR_PROFILE && (
             <section className="settings-section">
                 <h2>长期投资记忆</h2>
                 <p className="settings-note">
@@ -636,6 +890,7 @@ export default function Settings() {
                     </p>
                 )}
             </section>
+            )}
 
             <div className="disclaimer-box">
                 <strong>免责声明：</strong>

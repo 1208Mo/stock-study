@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import ScorecardPanel from '../components/ScorecardPanel'
 import type {
     DecisionHistoryWithPicks,
     DecisionPickReviewFront,
+    DecisionScorecard,
     DecisionStats,
 } from '../types'
 
@@ -42,9 +44,9 @@ function RegimeMiniBadge({ regimeJson }: { regimeJson: string | null }) {
         return null
     }
     const map: Record<string, { text: string; cls: string }> = {
-        offensive: { text: '进攻', cls: 'regime-badge offensive mini' },
-        defensive: { text: '防守', cls: 'regime-badge defensive mini' },
-        cash: { text: '空仓', cls: 'regime-badge cash mini' },
+        offensive: { text: '偏强', cls: 'regime-badge offensive mini' },
+        defensive: { text: '震荡', cls: 'regime-badge defensive mini' },
+        cash: { text: '偏弱', cls: 'regime-badge cash mini' },
     }
     const item = regime ? map[regime] : null
     if (!item) return null
@@ -93,6 +95,7 @@ function StatsCard({ label, value, sub, tone = 'neutral' }: StatsCardProps) {
 export default function DecisionHistory() {
     const [decisions, setDecisions] = useState<DecisionHistoryWithPicks[]>([])
     const [stats, setStats] = useState<DecisionStats | null>(null)
+    const [scorecard, setScorecard] = useState<DecisionScorecard | null>(null)
     const [expandedId, setExpandedId] = useState<number | null>(null)
     const [loading, setLoading] = useState(false)
     const [reviewing, setReviewing] = useState<number | null>(null)
@@ -117,9 +120,14 @@ export default function DecisionHistory() {
         try {
             const s = await window.api.decision.stats(statsDays)
             setStats(s)
-        } catch (e) {
+        } catch {
             // 统计失败不阻塞列表
             setStats(null)
+        }
+        try {
+            setScorecard(await window.api.decision.scorecard(statsDays))
+        } catch {
+            setScorecard(null)
         }
     }, [statsDays])
 
@@ -269,6 +277,11 @@ export default function DecisionHistory() {
                     />
                 </section>
             )}
+
+            {/* AI 战绩切片：它在什么情况下靠得住 */}
+            <section className="decision-panel sc-panel">
+                <ScorecardPanel data={scorecard} />
+            </section>
 
             {reviewMsg && (
                 <div className={reviewMsg.type === 'ok' ? 'dh-ok-msg' : 'error-msg'}>

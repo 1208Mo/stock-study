@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useSearchParams } from 'react-router-dom'
 import { ChatSidebar } from '../components/ChatSidebar'
 import DecisionHistory from './DecisionHistory'
 import DecisionCard from '../components/DecisionCard'
-import { useChatSessionsStore, type ChatMessage } from '../stores/chatSessionsStore'
+import { useChatSessionsStore, type AgentStep, type ChatMessage } from '../stores/chatSessionsStore'
 import type { ResearchToolTrace, ImageContent } from '../types'
 
 const SUGGESTIONS = [
@@ -31,6 +32,51 @@ function isDecisionIntent(text: string): boolean {
 }
 
 const SCROLL_THRESHOLD = 120 // px：距底部这么近才自动跟随
+
+/**
+ * Agent 执行过程可视化：每一步一行，点开看该 Agent 实际说了什么。
+ * 多空辩论会按轮次分组，能直观看到谁在反驳谁。
+ */
+function AgentProgressTrace({ steps, live }: { steps: AgentStep[]; live?: boolean }) {
+    const [openIdx, setOpenIdx] = useState<number | null>(null)
+    const last = steps[steps.length - 1]
+
+    return (
+        <div className="chat-decision-progress">
+            {live && (
+                <div className="chat-analyzing-message">
+                    <span className="chat-dot" />
+                    <span>{last?.label ?? '小墨鱼团队分析中…'}</span>
+                </div>
+            )}
+            {steps.length > 0 && (
+                <ul className="agent-progress-list">
+                    {(live ? steps.slice(0, -1) : steps).map((s, i) => {
+                        const open = openIdx === i
+                        const isDebate = s.node === 'bullResearchNode' || s.node === 'bearResearchNode'
+                        return (
+                            <li key={i} className={`done ${isDebate ? 'debate' : ''}`}>
+                                <button
+                                    className="agent-step-head"
+                                    disabled={!s.content}
+                                    onClick={() => setOpenIdx(open ? null : i)}
+                                >
+                                    <span className="tick">✓</span>
+                                    <span>
+                                        {s.label}
+                                        {s.round ? ` · 第 ${s.round} 轮` : ''}
+                                    </span>
+                                    {s.content && <span className="agent-step-toggle">{open ? '收起' : '展开'}</span>}
+                                </button>
+                                {open && s.content && <div className="agent-step-body">{s.content}</div>}
+                            </li>
+                        )
+                    })}
+                </ul>
+            )}
+        </div>
+    )
+}
 
 const MessageBubble = memo(function MessageBubble({
     msg,
@@ -63,26 +109,17 @@ const MessageBubble = memo(function MessageBubble({
                 <div className="chat-bubble-col">
                     <div className="chat-bubble assistant chat-decision-bubble">
                         {msg.pending ? (
-                            <div className="chat-decision-progress">
-                                <div className="chat-analyzing-message">
-                                    <span className="chat-dot" />
-                                    <span>
-                                        {msg.progress?.[msg.progress.length - 1] ??
-                                            '小墨鱼团队分析中…'}
-                                    </span>
-                                </div>
-                                {msg.progress && msg.progress.length > 1 && (
-                                    <ul className="agent-progress-list">
-                                        {msg.progress.slice(0, -1).map((s, i) => (
-                                            <li key={i} className="done">
-                                                <span className="tick">✓</span> {s}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                            </div>
+                            <AgentProgressTrace steps={msg.progress ?? []} live />
                         ) : msg.decision ? (
-                            <DecisionCard data={msg.decision} onOpenFull={onOpenFull} />
+                            <>
+                                <DecisionCard data={msg.decision} onOpenFull={onOpenFull} />
+                                {msg.progress && msg.progress.length > 0 && (
+                                    <details className="agent-trace-replay">
+                                        <summary>查看 Agent 执行过程（{msg.progress.length} 步）</summary>
+                                        <AgentProgressTrace steps={msg.progress} />
+                                    </details>
+                                )}
+                            </>
                         ) : (
                             <span>{msg.content}</span>
                         )}
@@ -275,6 +312,17 @@ export default function AIChat() {
         isNearBottomRef.current = true
     }, [activeSessionId])
 
+    // 从命令面板/个股页带问题跳转过来（/chat?q=...）：预填输入框，由用户确认后发送
+    const [searchParams, setSearchParams] = useSearchParams()
+    useEffect(() => {
+        const q = searchParams.get('q')
+        if (!q || !loaded || !activeSessionId) return
+        switchTab('chat')
+        setInput(q)
+        setSearchParams({}, { replace: true })
+        setTimeout(() => inputRef.current?.focus(), 0)
+    }, [searchParams, setSearchParams, loaded, activeSessionId])
+
     // 智能自动滚动：只有当用户接近底部时才跟随
     useLayoutEffect(() => {
         const el = messagesRef.current
@@ -395,7 +443,7 @@ export default function AIChat() {
                 content: '',
                 pending: true,
                 kind: 'decision',
-                progress: ['小墨鱼团队启动中…'],
+                progress: [{ node: 'start', label: '小墨鱼团队启动中…' }],
             })
             setSending(true)
             isNearBottomRef.current = true
@@ -405,7 +453,10 @@ export default function AIChat() {
                 if (data.requestId !== requestId) return
                 updatePendingMessage(sessionId, (m) => ({
                     ...m,
-                    progress: [...(m.progress ?? []), data.label],
+                    progress: [
+                        ...(m.progress ?? []),
+                        { node: data.node, label: data.label, content: data.content, round: data.round },
+                    ],
                 }))
             })
 

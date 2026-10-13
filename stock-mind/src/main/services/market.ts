@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { withPush2, withRetry } from './dataSource'
 
 export interface QuoteData {
     code: string
@@ -49,15 +50,21 @@ async function fetchQuoteFromEastmoney(code: string): Promise<QuoteData> {
         ut: 'bd1d9ddb04089700cf9c27f6f7426281',
     }
 
-    const resp = await axios.get(url, { params, timeout: 5000 })
-    const d = resp.data?.data
+    const resp = await withPush2(() => axios.get(url, { params, timeout: 5000 }))
+    return parseEastmoneyQuote(resp.data?.data, code)
+}
 
+/**
+ * 解析东方财富实时行情原始字段。独立成纯函数以便单测，防止上游字段/缩放口径
+ * 变化导致静默错数据。价格字段按 f59 位小数缩放，涨跌幅按 f152 位小数缩放。
+ */
+export function parseEastmoneyQuote(d: Record<string, number | string> | undefined | null, code: string): QuoteData {
     if (!d || !d.f43) throw new Error(`eastmoney: no data for ${code}`)
 
     const decimals = typeof d.f59 === 'number' ? d.f59 : 2
     const scale = Math.pow(10, decimals)
-    const price = d.f43 / scale
-    const prevClose = d.f60 / scale
+    const price = (d.f43 as number) / scale
+    const prevClose = (d.f60 as number) / scale
     const change = parseFloat((price - prevClose).toFixed(decimals))
     const changePercent = typeof d.f170 === 'number'
         ? d.f170 / Math.pow(10, typeof d.f152 === 'number' ? d.f152 : 2)
@@ -67,15 +74,15 @@ async function fetchQuoteFromEastmoney(code: string): Promise<QuoteData> {
 
     return {
         code,
-        name: d.f58,
+        name: d.f58 as string,
         price,
         change,
         changePercent,
-        open: d.f46 / scale,
-        high: d.f44 / scale,
-        low: d.f45 / scale,
-        volume: d.f47,
-        amount: d.f48,
+        open: (d.f46 as number) / scale,
+        high: (d.f44 as number) / scale,
+        low: (d.f45 as number) / scale,
+        volume: d.f47 as number,
+        amount: d.f48 as number,
         timestamp: new Date().toISOString(),
     }
 }
@@ -86,14 +93,21 @@ async function fetchQuoteFromSina(code: string): Promise<QuoteData> {
     const symbol = getSinaSymbol(code)
     const url = `https://hq.sinajs.cn/list=${symbol}`
 
-    const resp = await axios.get(url, {
-        timeout: 5000,
-        responseType: 'arraybuffer',
-        headers: { Referer: 'https://finance.sina.com.cn' },
-    })
+    const resp = await withRetry(() =>
+        axios.get(url, {
+            timeout: 5000,
+            responseType: 'arraybuffer',
+            headers: { Referer: 'https://finance.sina.com.cn' },
+        })
+    )
 
     const iconv = await import('iconv-lite')
     const text: string = iconv.decode(Buffer.from(resp.data), 'gbk')
+    return parseSinaQuote(text, code)
+}
+
+/** 解析新浪 hq_str 文本行情。独立成纯函数以便单测。 */
+export function parseSinaQuote(text: string, code: string): QuoteData {
     const match = text.match(/="([^"]+)"/)
     if (!match) throw new Error(`sina: no data for ${code}`)
 
@@ -298,15 +312,17 @@ export async function fetchMonthlyKLine(code: string, months: number = 36): Prom
             lmt: months,
             ut: 'bd1d9ddb04089700cf9c27f6f7426281',
         }
-        const resp = await axios.get(url, {
-            params,
-            timeout: 8000,
-            headers: {
-                'User-Agent':
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                Referer: 'https://quote.eastmoney.com/',
-            },
-        })
+        const resp = await withPush2(() =>
+            axios.get(url, {
+                params,
+                timeout: 8000,
+                headers: {
+                    'User-Agent':
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    Referer: 'https://quote.eastmoney.com/',
+                },
+            })
+        )
         const klines: string[] = resp.data?.data?.klines ?? []
         if (klines.length > 0) {
             return klines.map((line) => {
@@ -350,20 +366,131 @@ export async function fetchMonthlyKLine(code: string, months: number = 36): Prom
     }))
 }
 
-// 东方财富快讯（用于 AI 分析今日市场热点）
-export async function fetchMarketNews(count: number = 20): Promise<string[]> {
-    const url = `https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_1_${count}_.html`
-    const resp = await axios.get(url, {
-        timeout: 8000,
-        headers: { Referer: 'https://finance.eastmoney.com/a/caijingyaowen.html' },
+// ─── 通用 K 线：任意周期 + 复权 ─────────────────────────────────────────
+// 东财 push2his 支持 1/5/15/30/60 分钟、日/周/月线和前/后复权；被反爬时降级新浪。
+// 新浪只有不复权数据、没有 1 分钟线，降级时在返回值里如实标出实际口径。
+
+export type KLinePeriod = '1m' | '5m' | '15m' | '30m' | '60m' | 'day' | 'week' | 'month'
+/** none 不复权 / qfq 前复权（以最新价为基准往回调整，看形态用）/ hfq 后复权（以上市价为基准，算长期收益用） */
+export type AdjustType = 'none' | 'qfq' | 'hfq'
+
+export interface KLineResult {
+    bars: KLineData[]
+    source: 'eastmoney' | 'sina'
+    /** 实际生效的复权方式（降级新浪时恒为 none） */
+    adjust: AdjustType
+}
+
+const EM_KLT: Record<KLinePeriod, number> = { '1m': 1, '5m': 5, '15m': 15, '30m': 30, '60m': 60, day: 101, week: 102, month: 103 }
+const EM_FQT: Record<AdjustType, number> = { none: 0, qfq: 1, hfq: 2 }
+const SINA_SCALE: Partial<Record<KLinePeriod, number>> = { '5m': 5, '15m': 15, '30m': 30, '60m': 60, day: 240, week: 1200, month: 7200 }
+
+async function fetchKLineFromEastmoney(code: string, period: KLinePeriod, adjust: AdjustType, limit: number): Promise<KLineData[]> {
+    const resp = await withPush2(() =>
+        axios.get('https://push2his.eastmoney.com/api/qt/stock/kline/get', {
+            params: {
+                secid: getSecid(code),
+                fields1: 'f1,f2,f3',
+                fields2: 'f51,f52,f53,f54,f55,f56',
+                klt: EM_KLT[period],
+                fqt: EM_FQT[adjust],
+                end: 20500101,
+                lmt: limit,
+                ut: 'bd1d9ddb04089700cf9c27f6f7426281',
+            },
+            timeout: 8000,
+            headers: {
+                'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                Referer: 'https://quote.eastmoney.com/',
+            },
+        })
+    )
+    const klines: string[] = resp.data?.data?.klines ?? []
+    if (klines.length === 0) throw new Error(`eastmoney: empty kline ${code}`)
+    return parseEastmoneyKlines(klines, limit)
+}
+
+/**
+ * 解析东方财富 K 线字符串数组（"日期,开,收,高,低,量,..."）。
+ * 东财成交量单位是「手」，统一 ×100 换算成「股」，与新浪口径一致。独立成纯函数以便单测。
+ */
+export function parseEastmoneyKlines(klines: string[], limit: number): KLineData[] {
+    return klines.slice(-limit).map((line) => {
+        const [date, open, close, high, low, volume] = line.split(',')
+        return { date, open: +open, close: +close, high: +high, low: +low, volume: +volume * 100 }
     })
-    const text: string = resp.data
-    // 返回格式是 JS 赋值表达式，提取 JSON
-    const match = text.match(/var ajaxResult=(\{.+\})/)
-    if (!match) throw new Error('新闻接口解析失败')
-    const json = JSON.parse(match[1])
-    const list: Array<{ title: string }> = json?.LivesList ?? []
-    return list.map((item) => item.title).filter(Boolean)
+}
+
+async function fetchKLineFromSina(code: string, period: KLinePeriod, limit: number): Promise<KLineData[]> {
+    const scale = SINA_SCALE[period]
+    if (!scale) throw new Error(`新浪不提供 ${period} 周期K线`)
+    const resp = await withRetry(() =>
+        axios.get(
+            'https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData',
+            { params: { symbol: getSinaSymbol(code), scale, datalen: limit, ma: 'no' }, timeout: 8000 }
+        )
+    )
+    const list: Array<Record<string, string>> = Array.isArray(resp.data) ? resp.data : []
+    if (list.length === 0) throw new Error(`K线数据为空：${code}`)
+    return parseSinaKlines(list)
+}
+
+/** 解析新浪 getKLineData 数组。分钟线新浪带秒（14:45:00），去掉以对齐东财。独立成纯函数以便单测。 */
+export function parseSinaKlines(list: Array<Record<string, string>>): KLineData[] {
+    return list.map((item) => ({
+        date: item.day.length > 16 ? item.day.slice(0, 16) : item.day,
+        open: parseFloat(item.open),
+        close: parseFloat(item.close),
+        high: parseFloat(item.high),
+        low: parseFloat(item.low),
+        volume: parseFloat(item.volume),
+    }))
+}
+
+const klineExCache = new Map<string, { value: KLineResult; expiresAt: number }>()
+
+export async function fetchKLineEx(
+    code: string,
+    period: KLinePeriod = 'day',
+    adjust: AdjustType = 'qfq',
+    limit: number = 120
+): Promise<KLineResult> {
+    const c = code.trim()
+    const n = Math.max(10, Math.min(1500, Math.round(limit)))
+    const key = `${c}|${period}|${adjust}|${n}`
+    const hit = klineExCache.get(key)
+    if (hit && hit.expiresAt > Date.now()) return hit.value
+
+    let value: KLineResult
+    try {
+        value = { bars: await fetchKLineFromEastmoney(c, period, adjust, n), source: 'eastmoney', adjust }
+    } catch {
+        value = { bars: await fetchKLineFromSina(c, period, n), source: 'sina', adjust: 'none' }
+    }
+    // 分钟线变化快，缓存短一些；选股批量扫描时同一只票不会重复请求
+    const ttl = period.endsWith('m') ? 20_000 : 60_000
+    klineExCache.set(key, { value, expiresAt: Date.now() + ttl })
+    if (klineExCache.size > 2000) klineExCache.clear()
+    return value
+}
+
+// 东方财富 7x24 快讯标题（用于 AI 分析今日市场热点）
+// 旧的 newsapi/kuaixun 接口现在只会返回 1 条，统一走 getFastNewsList
+export async function fetchMarketNews(count: number = 20): Promise<string[]> {
+    const resp = await axios.get('https://np-weblist.eastmoney.com/comm/web/getFastNewsList', {
+        params: { client: 'web', biz: 'web_724', fastColumn: 102, sortEnd: '', pageSize: count, req_trace: Date.now() },
+        timeout: 8000,
+        headers: {
+            'User-Agent':
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            Referer: 'https://kuaixun.eastmoney.com/',
+        },
+    })
+    const list: Array<{ title?: string }> = resp.data?.data?.fastNewsList ?? []
+    const titles = list.map((item) => item.title).filter((t): t is string => !!t)
+    if (titles.length === 0) throw new Error('新闻接口返回为空')
+    return titles
 }
 
 export interface StockSectorInfo {
@@ -384,11 +511,13 @@ export async function fetchSectorInfo(code: string): Promise<StockSectorInfo> {
     if (secid) {
         for (let i = 0; i < 2; i++) {
             try {
-                const resp = await axios.get('https://push2.eastmoney.com/api/qt/stock/get', {
-                    params: { secid, fields: 'f127,f136', ut: 'bd1d9ddb04089700cf9c27f6f7426281' },
-                    timeout: 8000,
-                    headers: { 'User-Agent': ua, Referer: 'https://quote.eastmoney.com/' },
-                })
+                const resp = await withPush2(() =>
+                    axios.get('https://push2.eastmoney.com/api/qt/stock/get', {
+                        params: { secid, fields: 'f127,f136', ut: 'bd1d9ddb04089700cf9c27f6f7426281' },
+                        timeout: 8000,
+                        headers: { 'User-Agent': ua, Referer: 'https://quote.eastmoney.com/' },
+                    })
+                )
                 const d = resp.data?.data ?? {}
                 if (d.f127 || d.f136) {
                     return { sector: d.f127 || '', subSector: d.f136 || '' }
@@ -481,16 +610,22 @@ export async function fetchTopSectors(
 
     // 东方财富优先，失败后 fallback 新浪
     try {
-        const resp = await axios.get(`${base}?${qs}`, {
-            timeout: 6000,
-            headers: { Referer: 'https://quote.eastmoney.com/' },
-        })
+        const resp = await withPush2(() =>
+            axios.get(`${base}?${qs}`, {
+                timeout: 6000,
+                headers: {
+                    'User-Agent':
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    Referer: 'https://quote.eastmoney.com/',
+                },
+            })
+        )
         const list: Array<{ f12: string; f14: string; f3: number }> = resp.data?.data?.diff ?? []
         if (list.length > 0) {
             return list.map((item) => ({
                 code: item.f12,
                 name: item.f14,
-                changePercent: item.f3 / 100,
+                changePercent: item.f3,
             }))
         }
     } catch {
@@ -573,10 +708,11 @@ export async function fetchSectorKLine(bkCode: string, days: number = 7): Promis
         Referer: 'https://quote.eastmoney.com/',
     }
     try {
-        const resp = await axios.get(url, { params, timeout: 8000, headers: emHeaders })
+        const resp = await withPush2(() => axios.get(url, { params, timeout: 8000, headers: emHeaders }))
         const klines: string[] = resp.data?.data?.klines ?? []
         if (!klines || klines.length === 0) return []
-        return klines.map((line) => {
+        // beg=0 时东财忽略 lmt，会返回上市以来全部K线
+        return klines.slice(-days).map((line) => {
             const [date, open, close, high, low, volume] = line.split(',')
             return {
                 date,
@@ -597,7 +733,8 @@ export async function fetchSectorKLine(bkCode: string, days: number = 7): Promis
  */
 export async function fetchSectorTopStocks(
     bkCode: string,
-    topN: number = 5
+    topN: number = 5,
+    sortField: 'f3' | 'f6' = 'f3' // f3 涨跌幅 / f6 成交额
 ): Promise<{ code: string; name: string; changePercent: number }[]> {
     try {
         const listUrl = 'https://push2.eastmoney.com/api/qt/clist/get'
@@ -609,21 +746,27 @@ export async function fetchSectorTopStocks(
             ut: 'bd1d9ddb04089700cf9c27f6f7426281',
             fltt: 2,
             invt: 2,
-            fid: 'f3',
+            fid: sortField,
             fs: `b:${bkCode}`,
             fields: 'f12,f14,f3',
         }
-        const listResp = await axios.get(listUrl, {
-            params: listParams,
-            timeout: 6000,
-            headers: { Referer: 'https://quote.eastmoney.com/' },
-        })
+        const listResp = await withPush2(() =>
+            axios.get(listUrl, {
+                params: listParams,
+                timeout: 6000,
+                headers: {
+                    'User-Agent':
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    Referer: 'https://quote.eastmoney.com/',
+                },
+            })
+        )
         const stocks: Array<{ f12: string; f14: string; f3: number }> =
             listResp.data?.data?.diff ?? []
         return stocks.map((s) => ({
             code: s.f12,
             name: s.f14,
-            changePercent: s.f3 / 100,
+            changePercent: s.f3,
         }))
     } catch {
         return [] // 东财挂了，返回空数组
@@ -895,6 +1038,36 @@ function aggregateSectorTrend(stockKlines: KLineData[][]): KLineData[] {
     })
 }
 
+// 东财板块：直接取板块指数日K，归一化为首日 close=100
+async function fetchEmSectorTrend(
+    sector: { code: string; name: string; changePercent: number },
+    days: number
+): Promise<SectorTrendItem | null> {
+    const [raw, leaders] = await Promise.all([
+        fetchSectorKLine(sector.code, days),
+        fetchSectorTopStocks(sector.code, 1, 'f6'),
+    ])
+    const base = raw[0]?.close
+    if (raw.length < 2 || !base) return null
+    const norm = (v: number): number => Number(((v / base) * 100).toFixed(4))
+    const klines = raw.map((k) => ({
+        ...k,
+        open: norm(k.open),
+        close: norm(k.close),
+        high: norm(k.high),
+        low: norm(k.low),
+    }))
+    const last = klines[klines.length - 1].close
+    return {
+        code: sector.code,
+        name: sector.name,
+        changePercent: sector.changePercent,
+        return7d: Number((last - 100).toFixed(2)),
+        klines,
+        leaderName: leaders[0]?.name ?? '',
+    }
+}
+
 /**
  * 热门板块近7日趋势
  * 取板块列表 → 每板块取成交额前3成分股 → 聚合7日走势 → 按7日涨幅降序
@@ -908,6 +1081,9 @@ export async function fetchTopSectorTrends(
 
     const results = await mapWithConcurrency(sectors, 6, async (sector) => {
         try {
+            if (/^BK\d+$/.test(sector.code)) {
+                return await fetchEmSectorTrend(sector, days)
+            }
             const constituents = await fetchSectorConstituents(sector.code, 3)
             if (constituents.length === 0) return null
 

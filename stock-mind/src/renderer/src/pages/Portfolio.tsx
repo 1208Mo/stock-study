@@ -4,6 +4,7 @@ import { useHoldingsStore } from '../stores/holdingsStore'
 import type { Holding, DividendRecord } from '../types'
 import AddHoldingModal from '../components/AddHoldingModal'
 import { Tooltip } from '../components/Tooltip'
+import PortfolioAnalysis from '../components/PortfolioAnalysis'
 
 export default function Portfolio() {
     const { holdings, loading, fetchHoldings, deleteHolding } = useHoldingsStore()
@@ -15,6 +16,8 @@ export default function Portfolio() {
     // 首次加载后自动补全缺失板块的持仓，无需用户手动点"刷新板块"
     const autoFillSectorRef = useRef(false)
     const [sectorFilter, setSectorFilter] = useState<string>('全部')
+    const [tab, setTab] = useState<'list' | 'analysis'>('list')
+    const holdingsVersion = holdings.map((h) => `${h.id}:${h.quantity}:${h.avg_cost_price}`).join('|')
     const [dividendsMap, setDividendsMap] = useState<Record<string, DividendRecord[]>>({})
     const [divLoading, setDivLoading] = useState(false)
     const divLoadedRef = useRef(false)
@@ -425,6 +428,24 @@ export default function Portfolio() {
             )}
 
             {holdings.length > 0 && (
+                <div className="pa-tabs">
+                    <button className={`pa-tab ${tab === 'list' ? 'active' : ''}`} onClick={() => setTab('list')}>
+                        持仓明细
+                    </button>
+                    <button
+                        className={`pa-tab ${tab === 'analysis' ? 'active' : ''}`}
+                        onClick={() => setTab('analysis')}
+                    >
+                        收益分析
+                    </button>
+                </div>
+            )}
+
+            {tab === 'analysis' && holdings.length > 0 && (
+                <PortfolioAnalysis version={holdingsVersion} />
+            )}
+
+            {tab === 'list' && holdings.length > 0 && (
                 <div className="sector-chips">
                     <button
                         className={`sector-chip ${sectorFilter === '全部' ? 'active' : ''}`}
@@ -444,7 +465,7 @@ export default function Portfolio() {
                 </div>
             )}
 
-            {loading ? (
+            {(tab === 'list' || holdings.length === 0) && (loading ? (
                 <div className="loading">加载中...</div>
             ) : holdings.length === 0 ? (
                 <div className="empty-state">
@@ -486,7 +507,7 @@ export default function Portfolio() {
                         </div>
                     </div>
                 </div>
-            )}
+            ))}
 
             {showAdd && <AddHoldingModal onClose={() => setShowAdd(false)} />}
             {editingHolding && (

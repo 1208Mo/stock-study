@@ -37,8 +37,16 @@ export interface ChatMessage {
     // 决策卡片：kind==='decision' 时，用 DecisionCard 渲染而非普通文本
     kind?: 'decision'
     decision?: ChatDecisionResult
-    // 决策 Agent 生成过程中的进度步骤（pending 时展示）
-    progress?: string[]
+    // 决策 Agent 生成过程中的进度步骤（pending 时展示，完成后保留做过程回放）
+    progress?: AgentStep[]
+}
+
+/** Agent 执行过程中的一步：节点标签 + 该步产出的正文 */
+export interface AgentStep {
+    node: string
+    label: string
+    content?: string
+    round?: number
 }
 
 interface ChatSessionsState {

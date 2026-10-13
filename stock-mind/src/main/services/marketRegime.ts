@@ -1,16 +1,17 @@
 /**
  * 市场状态判断（marketRegime）
  *
- * 纯规则（非 LLM）的市场状态量化判断，作为每日决策 Agent 的客观锚。
- * 用上证/创业板指数趋势、MA5/MA20 均线、量能等客观指标判三态：
- *   - offensive（进攻）：多头排列 + 放量 + 5日正收益 → 正常仓位
- *   - defensive（防守）：默认态 / 震荡 / 缩量 → 降仓位
- *   - cash（空仓）：破位下跌 → 跳过选股，直接观望
+ * 纯规则（非 LLM）的大盘指标计算，作为每日决策 Agent 的客观参考（不做硬约束）。
+ * 用上证/创业板指数趋势、MA5/MA20 均线、量能等客观指标给出描述性标签：
+ *   - offensive（偏强）：多头排列 + 放量 + 5日正收益
+ *   - defensive（震荡）：默认态 / 震荡 / 缩量
+ *   - cash（偏弱）：破位下跌
+ * 标签只用于展示与提示词背景，仓位和取舍交给 AI 综合判断。
  *
  * 设计要点：
  * 1. 不能复用 fetchKLine —— 其 getSinaSymbol 用 /^[569]/ 判沪深，会把上证指数
  *    '000001' 错映射成 'sz000001'（实为平安银行股票）。本模块直传 'sh000001'。
- * 2. 单数据源失败降级到 defensive，不阻塞决策图。
+ * 2. 数据源失败降级到 defensive，不阻塞决策图。
  * 3. 判定优先级：先 cash（最严）→ 再 offensive（最严苛乐观）→ 否则 defensive。
  */
 
@@ -46,10 +47,6 @@ export interface MarketRegime {
         szIndex: IndexIndicators
     }
     rationale: string
-    /** 单标的最大仓位占可用资金比例 */
-    suggestedMaxPositionRatio: number
-    /** 候选标的数量上限 */
-    suggestedCandidateCount: number
 }
 
 /**
@@ -114,7 +111,7 @@ function volumeRatio(volumes: number[], period: number = 20): number | null {
     return today / avg
 }
 
-function buildIndicators(
+export function buildIndicators(
     name: string,
     code: string,
     klines: KLineData[],
@@ -203,14 +200,21 @@ export async function assessMarketRegime(): Promise<MarketRegime> {
             regime: 'defensive',
             score: 0,
             indicators: { shIndex: sh, szIndex: sz },
-            rationale:
-                '指数K线数据获取失败，无法判断市场状态，按防守态处理（降低仓位上限）。',
-            suggestedMaxPositionRatio: 0.15,
-            suggestedCandidateCount: 2,
+            rationale: '指数K线数据获取失败，无大盘指标可参考。',
         }
     }
 
-    // ── 三态判定（优先级：cash → offensive → defensive）──────────────────────
+    const { regime, score } = classifyRegime(sh)
+    return {
+        regime,
+        score,
+        indicators: { shIndex: sh, szIndex: sz },
+        rationale: buildRationale(sh, sz),
+    }
+}
+
+/** 三态判定（纯函数，单测覆盖）。优先级：cash → offensive → defensive */
+export function classifyRegime(sh: IndexIndicators): { regime: MarketRegimeType; score: number } {
     const shToday = sh.todayChangePct
     const shAboveMa20 = sh.aboveMa20
     const shMa5AboveMa20 = sh.ma5AboveMa20
@@ -259,29 +263,10 @@ export async function assessMarketRegime(): Promise<MarketRegime> {
     }
 
     score = Math.max(-100, Math.min(100, Math.round(score)))
-
-    const suggestedMaxPositionRatio =
-        regime === 'offensive' ? 0.25 : regime === 'defensive' ? 0.15 : 0
-    const suggestedCandidateCount =
-        regime === 'offensive' ? 3 : regime === 'defensive' ? 2 : 0
-
-    const rationale = buildRationale(regime, sh, sz)
-
-    return {
-        regime,
-        score,
-        indicators: { shIndex: sh, szIndex: sz },
-        rationale,
-        suggestedMaxPositionRatio,
-        suggestedCandidateCount,
-    }
+    return { regime, score }
 }
 
-function buildRationale(
-    regime: MarketRegimeType,
-    sh: IndexIndicators,
-    sz: IndexIndicators
-): string {
+function buildRationale(sh: IndexIndicators, sz: IndexIndicators): string {
     const posText = (above: boolean | null) =>
         above === null ? '（均线数据不足）' : above ? '站上MA20' : '跌破MA20'
     const arrangeText = (ma5Above: boolean | null) =>
@@ -290,14 +275,5 @@ function buildRationale(
     const shPart = `上证 ${sh.todayChangePct !== null ? fmtPct(sh.todayChangePct) : '—'}，${posText(sh.aboveMa20)}${arrangeText(sh.ma5AboveMa20)}，5日 ${fmtPct(sh.ret5d)}，量比 ${sh.volumeRatio !== null ? sh.volumeRatio.toFixed(2) : '—'}`
     const szPart = `创业板 ${sz.todayChangePct !== null ? fmtPct(sz.todayChangePct) : '—'}，5日 ${fmtPct(sz.ret5d)}`
 
-    let advice: string
-    if (regime === 'cash') {
-        advice = '市场破位下行，建议空仓观望，今日不开新仓。'
-    } else if (regime === 'offensive') {
-        advice = '市场多头排列且量能配合，可正常布局，仓位上限放宽至 25%。'
-    } else {
-        advice = '市场震荡偏弱，建议防守为主，仓位上限降至 15%、候选数减半。'
-    }
-
-    return `${shPart}；${szPart}。${advice}`
+    return `${shPart}；${szPart}。`
 }

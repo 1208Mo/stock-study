@@ -11,8 +11,7 @@
  *                               由代码确定性地应用，且只允许让结果更保守
  *
  * 图结构：
- *   fetchNews → assessRegime →(cash?)→ cashObserve → END
- *                            └(否则)→ analyzeMarket → discoverCandidates → fetchQuotes
+ *   fetchNews → assessRegime → analyzeMarket → discoverCandidates → fetchQuotes
  *                              → technicalFilter → riskCheck → prepareResearch
  *                              →(有候选?)→ [技术面/基本面/消息面分析师] → [多头, 空头] → makeDecision
  *                                        └(无候选)──────────────────────────────────→ makeDecision
@@ -33,7 +32,7 @@ import {
 import type { QuoteData } from './market'
 import type { AIProvider } from './ai'
 import { createChatModel } from './llm'
-import { formatHoldingsSummary, getAllHoldings, getAllWatchlist } from '../db'
+import { formatHoldingsSummary, formatScorecardForPrompt, getAllHoldings, getAllWatchlist } from '../db'
 import { assessMarketRegime, type MarketRegime } from './marketRegime'
 import { fetchFundamentals, fundamentalsToCompactLine } from './fundamentals'
 
@@ -97,6 +96,9 @@ export interface AgentDiagnostics {
     technicalAnalysis?: string
     fundamentalAnalysis?: string
     newsAnalysis?: string
+    // 多空辩论逐轮记录（多轮反驳时才会有多于 2 条）
+    debateHistory?: DebateTurn[]
+    debateRounds?: number
 }
 
 // ─── 2. 图的状态定义 ─────────────────────────────────────────────────────────
@@ -106,7 +108,6 @@ const DecisionState = Annotation.Root({
     date: Annotation<string>({ reducer: (_: string, b: string) => b }),
     capital: Annotation<number>({ reducer: (_: number, b: number) => b, default: () => 5000 }),
     riskLevel: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '平衡' }),
-    userProfile: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
     holdingsSummary: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
     headlines: Annotation<string[]>({
         reducer: (_: string[], b: string[]) => b,
@@ -146,7 +147,7 @@ const DecisionState = Annotation.Root({
         reducer: (_: QuoteData[], b: QuoteData[]) => b,
         default: () => [],
     }),
-    // 进入辩论/决策的最终候选（已按 regime 上限截断），bull/bear/裁判共用同一份
+    // 进入辩论/决策的最终候选（已按 MAX_RESEARCH_CANDIDATES 截断），bull/bear/裁判共用同一份
     researchCandidates: Annotation<QuoteData[]>({
         reducer: (_: QuoteData[], b: QuoteData[]) => b,
         default: () => [],
@@ -175,6 +176,18 @@ const DecisionState = Annotation.Root({
     bullResearch: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
     // 空头研究员论据
     bearResearch: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
+    // 历史战绩回顾（注入决策 prompt，让 AI 看到自己过去推荐的真实结果）
+    scorecard: Annotation<string>({ reducer: (_: string, b: string) => b, default: () => '' }),
+    // ── 多空辩论循环控制（参考 TradingAgents 的 should_continue_debate）──
+    // 最大轮数：1 轮 = 多头说一次 + 空头说一次
+    debateRounds: Annotation<number>({ reducer: (_: number, b: number) => b, default: () => 1 }),
+    // 已发言次数，多头/空头各发一次算 1
+    debateCount: Annotation<number>({ reducer: (a: number, b: number) => a + b, default: () => 0 }),
+    // 完整辩论记录（append），既喂给下一位发言人做反驳，也给前端展示
+    debateHistory: Annotation<DebateTurn[]>({
+        reducer: (a: DebateTurn[], b: DebateTurn[]) => [...a, ...b],
+        default: () => [],
+    }),
     // 风控官对每只标的的裁决说明（append）
     riskVerdicts: Annotation<string[]>({
         reducer: (a: string[], b: string[]) => [...a, ...b],
@@ -212,8 +225,57 @@ type DecisionStateType = typeof DecisionState.State
 // 文心同样支持 OpenAI 兼容端点（qianfan.baidubce.com/v2），无需单独 SDK
 // ─── 2. LLM 实例 ─────────────────────────────────────────────────────────────
 // 复用共享工厂（见 llm.ts）；决策场景用 temperature 0.7
-function createLLM(provider: AIProvider, apiKey: string, baseUrl?: string, model?: string) {
-    return createChatModel(provider, apiKey, baseUrl, model, 0.7)
+/**
+ * 双速模型路由（参考 TradingAgents 的 deep_think / quick_think 分层）：
+ * - fast：数据归纳类节点（市场摘要、三位分析师），量大但不需要强推理，用便宜快的模型
+ * - deep：多空辩论与最终裁决，需要逻辑链条，用强模型
+ * fastModel 未配置时退回 deep 模型，行为与之前一致。
+ */
+interface LLMPair {
+    fast: ReturnType<typeof createChatModel>
+    deep: ReturnType<typeof createChatModel>
+    fastModelName: string
+    deepModelName: string
+}
+
+function createLLMPair(
+    provider: AIProvider,
+    apiKey: string,
+    baseUrl?: string,
+    model?: string,
+    fastModel?: string
+): LLMPair {
+    const deep = createChatModel(provider, apiKey, baseUrl, model, 0.7)
+    const useFast = !!fastModel && fastModel !== model
+    return {
+        deep,
+        // 摘要任务温度低一些，减少发散
+        fast: useFast ? createChatModel(provider, apiKey, baseUrl, fastModel, 0.3) : deep,
+        fastModelName: useFast ? fastModel! : model || '(默认)',
+        deepModelName: model || '(默认)',
+    }
+}
+
+export interface DebateTurn {
+    round: number
+    side: 'bull' | 'bear'
+    content: string
+}
+
+/** 把辩论记录渲染成下一位发言人要反驳的材料 */
+function renderDebateHistory(history: DebateTurn[]): string {
+    if (history.length === 0) return '（这是第一轮，对手还没有发言）'
+    return history
+        .map((t) => `【第${t.round}轮 ${t.side === 'bull' ? '多头' : '空头'}】\n${t.content}`)
+        .join('\n\n')
+}
+
+/** 同一方历次发言拼起来，给裁判看完整论证链 */
+function collectSide(history: DebateTurn[], side: 'bull' | 'bear'): string {
+    const mine = history.filter((t) => t.side === side)
+    if (mine.length === 0) return ''
+    if (mine.length === 1) return mine[0].content
+    return mine.map((t) => `【第${t.round}轮】\n${t.content}`).join('\n\n')
 }
 
 // ─── 3. Prompt 模板 ───────────────────────────────────────────────────────────
@@ -262,24 +324,27 @@ const decisionTemplate = ChatPromptTemplate.fromMessages([
 4. 单标的 positionAmount 不超过 maxPositionPerTarget。
 5. action 只能是 "watch" 或 "avoid"，不允许输出直接买入指令。
 6. 所有价格字段必须使用候选池里已经给出的价位，不要自行编造。
-7. 用户画像只代表长期偏好和约束，不代表市场事实。
-8. 用户当前持仓是本地记录的事实。若候选标的已被用户持有，优先给"加仓/减仓/持有观察"建议而非新建仓，并在 reason 里说明；若候选与已持仓标的同属一个行业且该行业已高配，应在 reason 里提示行业集中度风险。
-9. 今日市场状态（marketRegime）是客观指标的硬约束：defensive 态应偏谨慎、仓位靠下限、reason 提示防守；cash 态不会进入此节点（已提前观望）。不要与 marketRegime 的结论冲突。
-10. 候选标的基本面（PE/PB/ROE/毛利率/营收净利同比等）是客观财务数据：优先选 ROE 稳定、毛利率高、营收净利正增长的标的；回避 PE 极高且成长停滞甚至负增长的标的。在 reason 里结合基本面说明取舍理由（如"PE 22 倍处于合理区间，ROE 30%+ 盈利能力强"）。基本面数据缺失时不要编造，按技术面决策。
-11. 你是这场多空辩论的最终裁判：下面提供了「多头研究员」和「空头研究员」对同一批候选的对立观点。你要综合双方论据独立裁决，而不是简单采信某一方；当空头指出的风险成立时，应体现在更谨慎的 action、更低的 positionAmount 或更明确的 noBuyCondition 上。reason 里要说明你为何采信或否定了某方观点。`,
+7. 用户当前持仓是本地记录的事实。若候选标的已被用户持有，优先给"加仓/减仓/持有观察"建议而非新建仓，并在 reason 里说明；若候选与已持仓标的同属一个行业且该行业已高配，应在 reason 里提示行业集中度风险。
+8. 今日大盘指标（上证/创业板涨跌、均线位置、量比）是客观参考，不是硬性规则：请结合消息面、板块主线和个股自身情况综合判断。大盘偏弱时可以更谨慎、降低仓位，但如果有逆势走强的主线和个股，也可以给出观察标的。
+9. 候选标的基本面（PE/PB/ROE/毛利率/营收净利同比等）是客观财务数据：优先选 ROE 稳定、毛利率高、营收净利正增长的标的；回避 PE 极高且成长停滞甚至负增长的标的。在 reason 里结合基本面说明取舍理由（如"PE 22 倍处于合理区间，ROE 30%+ 盈利能力强"）。基本面数据缺失时不要编造，按技术面决策。
+10. 你是这场多空辩论的最终裁判：下面提供了「多头研究员」和「空头研究员」对同一批候选的对立观点。你要综合双方论据独立裁决，而不是简单采信某一方；当空头指出的风险成立时，应体现在更谨慎的 action、更低的 positionAmount 或更明确的 noBuyCondition 上。reason 里要说明你为何采信或否定了某方观点。
+11. 下面会给出「历史战绩回顾」——这是你过去的推荐被真实行情验证后的结果，不是假设。请把它当成对自己判断能力的客观审计：
+   - 某类大盘状态下胜率明显偏低，说明你在该环境下的判断不可靠，应当降低仓位或直接观望；
+   - 「第 1 推荐」胜率低于靠后推荐，说明你的排序能力有问题，要重新检讨凭什么把某只排在最前；
+   - 止损触发占比过高，说明入场价定得太激进或止损定得太紧，应调整价位设定；
+   - 若某只标的反复推荐反复亏损，不要再推荐它。
+   不要在输出里复述战绩数字，而要让它真实改变你的取舍。`,
     ],
     [
         'human',
         `可用资金：{capital} 元
 风险偏好：{riskLevel}
-用户长期投资画像：
-{userProfile}
 
 用户当前持仓（成本口径，不含实时价）：
 {holdingsSummary}
 
 今日市场背景：{marketContext}
-今日市场状态（客观指标，硬约束）：{marketRegime}
+今日大盘指标（客观参考）：{marketRegime}
 单标的最大仓位：{maxPosition} 元
 
 风控提示：
@@ -296,6 +361,9 @@ const decisionTemplate = ChatPromptTemplate.fromMessages([
 
 ━━━ 空头研究员观点（看空/风险）━━━
 {bearResearch}
+
+━━━ 历史战绩回顾（你过去的推荐被真实行情验证的结果）━━━
+{scorecard}
 
 请严格按下面 JSON 结构输出：
 {{
@@ -395,7 +463,11 @@ const bullTemplate = ChatPromptTemplate.fromMessages([
 1. 在三位分析师（技术面/基本面/消息面）报告的基础上综合论证看多逻辑，可引用他们的结论。
 2. 只讲多头视角，但不许编造数据；只能引用给定的分析、行情与基本面。
 3. 简洁，每只标的 2-4 条要点，用"代码 名称："开头。
-4. 不要输出 JSON，不要给买卖价位，这一步只做论证。`,
+4. 不要输出 JSON，不要给买卖价位，这一步只做论证。
+5. 如果下面给出了空头的发言，你这一轮的重点是**逐条反驳**，而不是重复上一轮自己的论点：
+   - 针对空头提到的具体风险，说明它为什么不成立、已被price in，或影响有限；
+   - 空头指出的风险如果确实成立，诚实承认，并说明在什么条件下仍值得观察；
+   - 用"回应空头：…"开头点明你在回应哪一条，不要写成不相关的新论述。`,
     ],
     [
         'human',
@@ -413,7 +485,10 @@ const bullTemplate = ChatPromptTemplate.fromMessages([
 候选池行情：
 {candidates}
 
-请在分析师报告基础上，逐只给出看多理由。`,
+━━━ 此前的辩论记录（含空头发言，需要逐条回应）━━━
+{debateHistory}
+
+当前是第 {round} 轮。请在分析师报告基础上给出看多论证；若上面已有空头发言，请优先逐条反驳。`,
     ],
 ])
 
@@ -426,7 +501,11 @@ const bearTemplate = ChatPromptTemplate.fromMessages([
 1. 在三位分析师（技术面/基本面/消息面）报告的基础上找出被忽视的风险，可反驳他们偏乐观的结论。
 2. 只讲空头视角，但不许编造数据；只能引用给定的分析、行情与基本面。
 3. 简洁，每只标的 2-4 条要点，用"代码 名称："开头。
-4. 不要输出 JSON，不要给买卖价位，这一步只做论证。`,
+4. 不要输出 JSON，不要给买卖价位，这一步只做论证。
+5. 下面会给出多头的发言，你这一轮的重点是**逐条反驳**，而不是罗列泛泛的风险：
+   - 指出多头论据里的逻辑跳跃、数据被夸大、或忽略的前提；
+   - 多头的理由如果确实扎实，承认它，然后指出它在什么情况下会失效；
+   - 用"回应多头：…"开头点明你在反驳哪一条。`,
     ],
     [
         'human',
@@ -444,7 +523,10 @@ const bearTemplate = ChatPromptTemplate.fromMessages([
 候选池行情：
 {candidates}
 
-请在分析师报告基础上，逐只给出看空/风险理由。`,
+━━━ 此前的辩论记录（含多头发言，需要逐条反驳）━━━
+{debateHistory}
+
+当前是第 {round} 轮。请在分析师报告基础上给出看空/风险论证；若上面已有多头发言，请优先逐条反驳。`,
     ],
 ])
 
@@ -455,14 +537,14 @@ const riskControlTemplate = ChatPromptTemplate.fromMessages([
         `你是独立于决策的「风控官」，最后一道防线。你不重新选股，只审阅已生成的决策并决定是否踩刹车。
 规则：
 1. 你只能让结果更保守：keep（维持）、downgrade（降仓）、veto（一票否决，改为回避）。绝不允许提高仓位或新增标的。
-2. 重点关注：单标的仓位是否偏重、题材是否过度集中、空头研究员指出的重大风险是否已被裁判忽视、market/regime 是否要求防守。
+2. 重点关注：单标的仓位是否偏重、题材是否过度集中、空头研究员指出的重大风险是否已被裁判忽视、大盘环境偏弱时仓位是否过重。
 3. 只输出合法 JSON，不要 Markdown，不要 \`\`\`json 包裹。
 4. adjustments 里 code 必须来自下方"当前决策标的"，reason 用一句话说明裁决依据。
 5. downgrade 时 suggestedPositionAmount 给出建议仓位（元，需≤原仓位）；keep/veto 时该字段填 null。`,
     ],
     [
         'human',
-        `今日市场状态（硬约束）：{marketRegime}
+        `今日大盘指标（客观参考）：{marketRegime}
 单标的最大仓位：{maxPosition} 元
 
 空头研究员风险提示：
@@ -549,37 +631,56 @@ function defensiveRegimeFallback(reason: string): MarketRegime {
             shIndex: emptyIndexIndicators('上证指数', '000001'),
             szIndex: emptyIndexIndicators('创业板指', '399006'),
         },
-        rationale: `市场状态判断失败：${reason}，按防守态处理（仓位上限 15%）。`,
-        suggestedMaxPositionRatio: 0.15,
-        suggestedCandidateCount: 2,
+        rationale: `大盘指标获取失败：${reason}。`,
     }
 }
 
-// 市场状态判断节点（纯规则，非 LLM）：判进攻/防守/空仓三态
+// 大盘指标节点（纯规则，非 LLM）：计算指数指标与描述性标签，仅作为决策参考
 // assessMarketRegime 内部已对数据源失败降级，此处 try/catch 为最后兜底
 async function nodeAssessMarketRegime(
     state: DecisionStateType
 ): Promise<Partial<DecisionStateType>> {
+    // 历史战绩是纯本地查询，顺带在这一步取好，供 makeDecision 自我审计用
+    let scorecard = ''
+    try {
+        scorecard = formatScorecardForPrompt(60)
+    } catch (e) {
+        console.warn('读取历史战绩失败:', e)
+    }
+
     try {
         const regime = await assessMarketRegime()
         return {
             marketRegime: regime,
+            scorecard,
             workflowNotes: [
-                `市场状态判断：${regime.regime}（得分 ${regime.score}），建议仓位上限 ${(regime.suggestedMaxPositionRatio * 100).toFixed(0)}%、候选数 ${regime.suggestedCandidateCount}。${regime.rationale}`,
+                `大盘指标：${describeRegime(regime)}`,
             ],
         }
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         return {
             marketRegime: defensiveRegimeFallback(msg),
-            workflowNotes: [`市场状态判断异常，降级防守：${msg}`],
+            scorecard,
+            workflowNotes: [`大盘指标获取异常：${msg}`],
         }
     }
 }
 
+const REGIME_LABEL: Record<MarketRegime['regime'], string> = {
+    offensive: '偏强',
+    defensive: '震荡',
+    cash: '偏弱',
+}
+
+function describeRegime(regime: MarketRegime | null): string {
+    if (!regime) return '无大盘指标'
+    return `大盘${REGIME_LABEL[regime.regime]}（规则得分 ${regime.score}）：${regime.rationale}`
+}
+
 // analyzeMarket 是一个 RunnableSequence（chain）
 // 学习点：prompt | llm | parser 的管道写法
-function buildAnalyzeMarketNode(llm: ReturnType<typeof createLLM>) {
+function buildAnalyzeMarketNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([
         marketContextTemplate,
         llm,
@@ -698,10 +799,12 @@ function calcReferencePrices(q: QuoteData) {
     }
 }
 
-// 单标的最大仓位（元）：由 regime 动态决定，缺失时回退 0.2。makeDecision / riskControl / validate 共用同一口径
+// 单标的最大仓位（元）：固定兜底比例，具体仓位由 AI 在此范围内判断。makeDecision / riskControl / validate 共用同一口径
+const MAX_POSITION_RATIO = 0.2
+const MAX_RESEARCH_CANDIDATES = 3
+
 function computeMaxPosition(state: DecisionStateType): number {
-    const positionRatio = state.marketRegime?.suggestedMaxPositionRatio ?? 0.2
-    return Math.round((state.capital ?? 5000) * positionRatio)
+    return Math.round((state.capital ?? 5000) * MAX_POSITION_RATIO)
 }
 
 async function nodeTechnicalFilter(state: DecisionStateType): Promise<Partial<DecisionStateType>> {
@@ -786,7 +889,7 @@ async function nodeRiskCheck(state: DecisionStateType): Promise<Partial<Decision
     }
 }
 
-// 研究准备节点：把最终候选（按 regime 截断）+ 参考价位 + 基本面整理成文本，
+// 研究准备节点：把最终候选（按 MAX_RESEARCH_CANDIDATES 截断）+ 参考价位 + 基本面整理成文本，
 // 供多头研究员、空头研究员、裁判三方共享，避免各自重复计算与重复拉取基本面
 async function nodePrepareResearch(
     state: DecisionStateType
@@ -800,10 +903,7 @@ async function nodePrepareResearch(
         }
     }
 
-    // 候选数按 regime 上限截断（防守态减半，进攻态满额）
-    const regime = state.marketRegime
-    const candidateCap = regime?.suggestedCandidateCount ?? state.filteredQuotes.length
-    const quotedCandidates = state.filteredQuotes.slice(0, Math.max(0, candidateCap))
+    const quotedCandidates = state.filteredQuotes.slice(0, MAX_RESEARCH_CANDIDATES)
 
     const candidateLines = quotedCandidates
         .map((q: QuoteData) => {
@@ -838,7 +938,7 @@ async function nodePrepareResearch(
 
 // ─── 分析师层节点（技术面 / 基本面 / 消息面）──────────────────────────────────
 // 三者并行，各出一份聚焦报告，作为多空研究员的输入
-function buildTechnicalAnalystNode(llm: ReturnType<typeof createLLM>) {
+function buildTechnicalAnalystNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([technicalAnalystTemplate, llm, new StringOutputParser()])
     return async function nodeTechnicalAnalyst(
         state: DecisionStateType
@@ -851,7 +951,7 @@ function buildTechnicalAnalystNode(llm: ReturnType<typeof createLLM>) {
     }
 }
 
-function buildFundamentalAnalystNode(llm: ReturnType<typeof createLLM>) {
+function buildFundamentalAnalystNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([fundamentalAnalystTemplate, llm, new StringOutputParser()])
     return async function nodeFundamentalAnalyst(
         state: DecisionStateType
@@ -865,7 +965,7 @@ function buildFundamentalAnalystNode(llm: ReturnType<typeof createLLM>) {
     }
 }
 
-function buildNewsAnalystNode(llm: ReturnType<typeof createLLM>) {
+function buildNewsAnalystNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([newsAnalystTemplate, llm, new StringOutputParser()])
     return async function nodeNewsAnalyst(
         state: DecisionStateType
@@ -880,72 +980,61 @@ function buildNewsAnalystNode(llm: ReturnType<typeof createLLM>) {
 }
 
 // 多头研究员节点：只找看多理由
-function buildBullResearchNode(llm: ReturnType<typeof createLLM>) {
-    const chain = RunnableSequence.from([bullTemplate, llm, new StringOutputParser()])
-    return async function nodeBullResearch(
+function buildResearchNode(
+    llm: ReturnType<typeof createChatModel>,
+    side: 'bull' | 'bear',
+    template: typeof bullTemplate
+) {
+    const chain = RunnableSequence.from([template, llm, new StringOutputParser()])
+    const label = side === 'bull' ? '多头' : '空头'
+
+    return async function nodeResearch(
         state: DecisionStateType
     ): Promise<Partial<DecisionStateType>> {
-        if (state.researchCandidates.length === 0) return { bullResearch: '' }
-        const bullResearch = await chain.invoke({
+        if (state.researchCandidates.length === 0) {
+            return side === 'bull' ? { bullResearch: '' } : { bearResearch: '' }
+        }
+        // 第 n 轮 = 已发言次数 / 2 向下取整 + 1（多头先说）
+        const round = Math.floor(state.debateCount / 2) + 1
+        const content = await chain.invoke({
             marketContext: state.marketContext || '无市场背景',
             technicalAnalysis: state.technicalAnalysis || '无技术面分析',
             fundamentalAnalysis: state.fundamentalAnalysis || '无基本面分析',
             newsAnalysis: state.newsAnalysis || '无消息面分析',
             candidates: state.candidateBrief || '无候选',
+            debateHistory: renderDebateHistory(state.debateHistory),
+            round,
         })
-        return { bullResearch, workflowNotes: ['多头研究员已给出看多论据。'] }
+        const turn: DebateTurn = { round, side, content }
+        const history = [...state.debateHistory, turn]
+        const merged = collectSide(history, side)
+        return {
+            ...(side === 'bull' ? { bullResearch: merged } : { bearResearch: merged }),
+            debateHistory: [turn],
+            debateCount: 1,
+            workflowNotes: [`${label}研究员完成第 ${round} 轮发言。`],
+        }
     }
 }
 
-// 空头研究员节点：只找看空/风险理由
-function buildBearResearchNode(llm: ReturnType<typeof createLLM>) {
-    const chain = RunnableSequence.from([bearTemplate, llm, new StringOutputParser()])
-    return async function nodeBearResearch(
-        state: DecisionStateType
-    ): Promise<Partial<DecisionStateType>> {
-        if (state.researchCandidates.length === 0) return { bearResearch: '' }
-        const bearResearch = await chain.invoke({
-            marketContext: state.marketContext || '无市场背景',
-            technicalAnalysis: state.technicalAnalysis || '无技术面分析',
-            fundamentalAnalysis: state.fundamentalAnalysis || '无基本面分析',
-            newsAnalysis: state.newsAnalysis || '无消息面分析',
-            candidates: state.candidateBrief || '无候选',
-        })
-        return { bearResearch, workflowNotes: ['空头研究员已给出看空/风险论据。'] }
-    }
+/**
+ * 辩论是否继续（对应 TradingAgents 的 should_continue_debate）：
+ * 发言次数达到 2 × 轮数就交给裁判，否则交给对方反驳。
+ */
+function shouldContinueDebate(state: DecisionStateType): 'bullResearchNode' | 'bearResearchNode' | 'makeDecision' {
+    const maxTurns = Math.max(1, state.debateRounds || 1) * 2
+    if (state.debateCount >= maxTurns) return 'makeDecision'
+    const last = state.debateHistory[state.debateHistory.length - 1]
+    return last?.side === 'bull' ? 'bearResearchNode' : 'bullResearchNode'
 }
 
-// 空仓态节点：跳过选股与 LLM 决策，直接输出观望
-// 当 marketRegime.regime === 'cash' 时由条件边路由到此
-async function nodeCashObserve(
-    state: DecisionStateType
-): Promise<Partial<DecisionStateType>> {
-    const regime = state.marketRegime
-    const observeReason = regime?.rationale ?? '市场破位下行，建议空仓观望，今日不开新仓。'
-    const structuredDecision: StructuredDecision = {
-        summary: '市场状态为空仓态，今日建议观望，不开新仓。',
-        marketBias: 'negative',
-        maxPositionPerTarget: 0,
-        observeReason,
-        picks: [],
-    }
-    return {
-        // 用 regime 说明作为市场背景，供前端展示与落库
-        marketContext: regime?.rationale ?? '市场状态判断为空仓态，跳过选股。',
-        decision: renderStructuredDecision(structuredDecision),
-        structuredDecision,
-        workflowNotes: ['市场状态为 cash（空仓态），跳过选股与 AI 决策，直接输出观望。'],
-    }
-}
-
-function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
+function buildMakeDecisionNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([decisionTemplate, llm, new StringOutputParser()])
 
     return async function nodeMakeDecision(
         state: DecisionStateType
     ): Promise<Partial<DecisionStateType>> {
         const capital = state.capital ?? 5000
-        const regime = state.marketRegime
         const maxPosition = computeMaxPosition(state)
 
         // 候选为空（含 prepareResearch 直连的情况）：直接输出观望
@@ -967,17 +1056,13 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
         }
 
         const riskLevel = state.riskLevel ?? '平衡'
-        const regimeSummary = regime
-            ? `${regime.regime}（得分 ${regime.score}）：${regime.rationale}`
-            : '未判断市场状态'
         // 裁判综合 prepareResearch 产出的候选/基本面，以及多空研究员的对立论据
         const result = await chain.invoke({
             capital,
             riskLevel,
-            userProfile: state.userProfile || '未设置长期投资画像',
             holdingsSummary: state.holdingsSummary || '无持仓',
             marketContext: state.marketContext || '无市场背景',
-            marketRegime: regimeSummary,
+            marketRegime: describeRegime(state.marketRegime),
             riskWarnings:
                 state.riskWarnings.length > 0
                     ? state.riskWarnings.map((item, i) => `${i + 1}. ${item}`).join('\n')
@@ -986,6 +1071,7 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
             fundamentals: state.fundamentalsBrief || '无基本面数据',
             bullResearch: state.bullResearch || '（多头研究员无输出）',
             bearResearch: state.bearResearch || '（空头研究员无输出）',
+            scorecard: state.scorecard || '（暂无历史战绩）',
             maxPosition,
         })
 
@@ -1008,7 +1094,7 @@ function buildMakeDecisionNode(llm: ReturnType<typeof createLLM>) {
 }
 
 // 风控官节点：LLM 只「提议」keep/downgrade/veto，代码「执行」——只会让结果更保守
-function buildRiskControlNode(llm: ReturnType<typeof createLLM>) {
+function buildRiskControlNode(llm: ReturnType<typeof createChatModel>) {
     const chain = RunnableSequence.from([riskControlTemplate, llm, new StringOutputParser()])
     return async function nodeRiskControl(
         state: DecisionStateType
@@ -1020,9 +1106,6 @@ function buildRiskControlNode(llm: ReturnType<typeof createLLM>) {
         }
 
         const maxPosition = computeMaxPosition(state)
-        const regimeSummary = state.marketRegime
-            ? `${state.marketRegime.regime}（得分 ${state.marketRegime.score}）：${state.marketRegime.rationale}`
-            : '未判断市场状态'
         const picksText = decision.picks
             .map(
                 (p) =>
@@ -1033,7 +1116,7 @@ function buildRiskControlNode(llm: ReturnType<typeof createLLM>) {
         let verdict: RiskVerdict
         try {
             const raw = await chain.invoke({
-                marketRegime: regimeSummary,
+                marketRegime: describeRegime(state.marketRegime),
                 maxPosition,
                 bearResearch: state.bearResearch || '（空头研究员无输出）',
                 picks: picksText,
@@ -1109,7 +1192,7 @@ function buildRiskControlNode(llm: ReturnType<typeof createLLM>) {
 async function nodeValidateDecision(state: DecisionStateType): Promise<Partial<DecisionStateType>> {
     const issues: string[] = []
     const decision = state.structuredDecision
-    // 与 makeDecision 保持一致的 regime 口径仓位上限
+    // 与 makeDecision 保持一致的仓位上限
     const maxPosition = computeMaxPosition(state)
     const validCodes = new Set(state.filteredQuotes.map((q: QuoteData) => q.code))
 
@@ -1159,37 +1242,43 @@ export function buildDecisionGraph(
     provider: AIProvider,
     apiKey: string,
     baseUrl?: string,
-    model?: string
+    model?: string,
+    fastModel?: string
 ) {
-    const llm = createLLM(provider, apiKey, baseUrl, model)
+    const { fast, deep, fastModelName, deepModelName } = createLLMPair(
+        provider,
+        apiKey,
+        baseUrl,
+        model,
+        fastModel
+    )
+    if (fast !== deep) {
+        console.log(`[agent] 双速模型：摘要=${fastModelName} / 辩论决策=${deepModelName}`)
+    }
 
     const graph = new StateGraph(DecisionState)
         // 注册节点
         .addNode('fetchNews', nodesFetchNews)
         .addNode('assessRegime', nodeAssessMarketRegime)
-        .addNode('analyzeMarket', buildAnalyzeMarketNode(llm))
+        .addNode('analyzeMarket', buildAnalyzeMarketNode(fast))
         .addNode('discoverCandidates', nodeDiscoverCandidates)
         .addNode('fetchQuotes', nodesFetchQuotes)
         .addNode('technicalFilter', nodeTechnicalFilter)
         .addNode('riskCheck', nodeRiskCheck)
         .addNode('prepareResearch', nodePrepareResearch)
-        .addNode('technicalAnalyst', buildTechnicalAnalystNode(llm))
-        .addNode('fundamentalAnalyst', buildFundamentalAnalystNode(llm))
-        .addNode('newsAnalyst', buildNewsAnalystNode(llm))
-        .addNode('bullResearchNode', buildBullResearchNode(llm))
-        .addNode('bearResearchNode', buildBearResearchNode(llm))
-        .addNode('makeDecision', buildMakeDecisionNode(llm))
-        .addNode('riskControl', buildRiskControlNode(llm))
+        .addNode('technicalAnalyst', buildTechnicalAnalystNode(fast))
+        .addNode('fundamentalAnalyst', buildFundamentalAnalystNode(fast))
+        .addNode('newsAnalyst', buildNewsAnalystNode(fast))
+        .addNode('bullResearchNode', buildResearchNode(deep, 'bull', bullTemplate))
+        .addNode('bearResearchNode', buildResearchNode(deep, 'bear', bearTemplate))
+        .addNode('makeDecision', buildMakeDecisionNode(deep))
+        .addNode('riskControl', buildRiskControlNode(deep))
         .addNode('validateDecision', nodeValidateDecision)
-        .addNode('cashObserve', nodeCashObserve)
 
         // 定义边（执行顺序）
         .addEdge('__start__', 'fetchNews')
         .addEdge('fetchNews', 'assessRegime')
-        // 市场状态判断后条件分流：cash 态跳过选股直接观望，否则走完整流程
-        .addConditionalEdges('assessRegime', (state) =>
-            state.marketRegime?.regime === 'cash' ? 'cashObserve' : 'analyzeMarket'
-        )
+        .addEdge('assessRegime', 'analyzeMarket')
         .addEdge('analyzeMarket', 'discoverCandidates')
         .addEdge('discoverCandidates', 'fetchQuotes')
         .addEdge('fetchQuotes', 'technicalFilter')
@@ -1201,21 +1290,23 @@ export function buildDecisionGraph(
                 ? 'makeDecision'
                 : ['technicalAnalyst', 'fundamentalAnalyst', 'newsAnalyst']
         )
-        // 三位分析师完成后 fan-in 到多头、空头研究员（各等三份报告齐了再跑一次）
+        // 三位分析师完成后 fan-in 到多头研究员，由它开第一轮
         .addEdge('technicalAnalyst', 'bullResearchNode')
         .addEdge('fundamentalAnalyst', 'bullResearchNode')
         .addEdge('newsAnalyst', 'bullResearchNode')
-        .addEdge('technicalAnalyst', 'bearResearchNode')
-        .addEdge('fundamentalAnalyst', 'bearResearchNode')
-        .addEdge('newsAnalyst', 'bearResearchNode')
-        // fan-in：makeDecision 等多头、空头都完成后运行一次
-        .addEdge('bullResearchNode', 'makeDecision')
-        .addEdge('bearResearchNode', 'makeDecision')
+        // 多空交替反驳，轮数到了才交给裁判（debateRounds 可配，默认 1 轮）
+        .addConditionalEdges('bullResearchNode', shouldContinueDebate, [
+            'bearResearchNode',
+            'makeDecision',
+        ])
+        .addConditionalEdges('bearResearchNode', shouldContinueDebate, [
+            'bullResearchNode',
+            'makeDecision',
+        ])
         // 裁判出初步决策 → 风控官复核 → 程序校验
         .addEdge('makeDecision', 'riskControl')
         .addEdge('riskControl', 'validateDecision')
         .addEdge('validateDecision', END)
-        .addEdge('cashObserve', END)
 
     return graph.compile()
 }
@@ -1225,7 +1316,7 @@ export function buildDecisionGraph(
 // 各节点的中文标签，用于流式进度提示（前端逐步显示 Agent 团队推进到哪一步）
 const NODE_LABELS: Record<string, string> = {
     fetchNews: '拉取快讯与板块',
-    assessRegime: '判断市场状态',
+    assessRegime: '计算大盘指标',
     analyzeMarket: '分析市场主线',
     discoverCandidates: '发现候选标的',
     fetchQuotes: '拉取候选行情',
@@ -1240,12 +1331,38 @@ const NODE_LABELS: Record<string, string> = {
     makeDecision: '🧑‍⚖️ 裁判综合决策',
     riskControl: '🛡️ 风控官复核',
     validateDecision: '决策校验',
-    cashObserve: '空仓观望',
 }
 
 export interface DecisionProgress {
     node: string
     label: string
+    /** 该节点本次产出的正文（分析师报告 / 辩论发言 / 风控裁决），用于过程可视化 */
+    content?: string
+    /** 辩论轮次，仅多空节点有 */
+    round?: number
+}
+
+/** 从节点的局部状态更新里取出可展示的正文 */
+function extractProgressContent(node: string, update: Record<string, unknown>): { content?: string; round?: number } {
+    if (node === 'bullResearchNode' || node === 'bearResearchNode') {
+        const turns = (update.debateHistory as DebateTurn[] | undefined) ?? []
+        const turn = turns[turns.length - 1]
+        return turn ? { content: turn.content, round: turn.round } : {}
+    }
+    const textKeys: Record<string, string> = {
+        analyzeMarket: 'marketContext',
+        technicalAnalyst: 'technicalAnalysis',
+        fundamentalAnalyst: 'fundamentalAnalysis',
+        newsAnalyst: 'newsAnalysis',
+        makeDecision: 'decision',
+    }
+    const key = textKeys[node]
+    if (key && typeof update[key] === 'string') return { content: update[key] as string }
+    if (node === 'riskControl') {
+        const verdicts = (update.riskVerdicts as string[] | undefined) ?? []
+        if (verdicts.length > 0) return { content: verdicts.join('\n') }
+    }
+    return {}
 }
 
 export interface AgentDecisionInput {
@@ -1253,11 +1370,14 @@ export interface AgentDecisionInput {
     apiKey: string
     baseUrl?: string
     model?: string
+    /** 可选的「快思考」模型，用于数据摘要类节点以省 token */
+    fastModel?: string
     date: string
     candidateCodes: Array<{ code: string; name: string }>
     capital?: number
     riskLevel?: string
-    userProfile?: string
+    /** 多空辩论轮数，1 轮 = 多头 + 空头各一次，默认 1，建议不超过 3 */
+    debateRounds?: number
 }
 
 export interface AgentDecisionOutput {
@@ -1273,7 +1393,13 @@ export async function runDecisionAgent(
     input: AgentDecisionInput,
     onProgress?: (progress: DecisionProgress) => void
 ): Promise<AgentDecisionOutput> {
-    const app = buildDecisionGraph(input.provider, input.apiKey, input.baseUrl, input.model)
+    const app = buildDecisionGraph(
+        input.provider,
+        input.apiKey,
+        input.baseUrl,
+        input.model,
+        input.fastModel
+    )
 
     // 用 stream 同时拿「节点更新」(做进度提示) 和「完整状态快照」(做最终结果)
     // streamMode 数组会 yield [mode, chunk] 元组
@@ -1282,11 +1408,12 @@ export async function runDecisionAgent(
             date: input.date,
             capital: input.capital ?? 5000,
             riskLevel: input.riskLevel ?? '平衡',
-            userProfile: input.userProfile ?? '',
             holdingsSummary: formatHoldingsSummary(),
             candidateCodes: input.candidateCodes,
+            debateRounds: Math.min(3, Math.max(1, input.debateRounds ?? 1)),
         },
-        { streamMode: ['updates', 'values'] }
+        // 3 轮辩论最多 6 次发言 + 其余节点，留足递归上限
+        { streamMode: ['updates', 'values'], recursionLimit: 50 }
     )
 
     let result: Partial<DecisionStateType> = {}
@@ -1295,7 +1422,12 @@ export async function runDecisionAgent(
             // chunk 形如 { 节点名: 局部状态更新 }
             const node = Object.keys(chunk as Record<string, unknown>)[0]
             if (node && onProgress) {
-                onProgress({ node, label: NODE_LABELS[node] ?? node })
+                const update = (chunk as Record<string, Record<string, unknown>>)[node] ?? {}
+                onProgress({
+                    node,
+                    label: NODE_LABELS[node] ?? node,
+                    ...extractProgressContent(node, update),
+                })
             }
         } else if (mode === 'values') {
             // 每步的完整状态快照，最后一个即最终状态
@@ -1318,6 +1450,8 @@ export async function runDecisionAgent(
             filteredQuoteCount: result.filteredQuotes?.length || 0,
             bullResearch: result.bullResearch || '',
             bearResearch: result.bearResearch || '',
+            debateHistory: result.debateHistory || [],
+            debateRounds: result.debateRounds || 1,
             riskVerdicts: result.riskVerdicts || [],
             technicalAnalysis: result.technicalAnalysis || '',
             fundamentalAnalysis: result.fundamentalAnalysis || '',

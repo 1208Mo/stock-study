@@ -1,16 +1,58 @@
+import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatDecisionResult } from '../stores/chatSessionsStore'
+import type { StructuredDecisionPick } from '../types'
 
 const REGIME_LABEL: Record<string, string> = {
-    offensive: '进攻',
-    defensive: '防守',
-    cash: '空仓观望',
+    offensive: '大盘偏强',
+    defensive: '大盘震荡',
+    cash: '大盘偏弱',
 }
 
 function money(v: number | null): string {
     if (v === null || v === undefined || Number.isNaN(v)) return '—'
     return v >= 10 ? v.toFixed(2) : v.toFixed(3)
+}
+
+function AdoptAlertsButton({ pick }: { pick: StructuredDecisionPick }) {
+    const [state, setState] = useState<'idle' | 'saving' | 'done' | 'error'>('idle')
+    if (pick.stopLoss === null && pick.takeProfit === null) return null
+
+    const adopt = async () => {
+        setState('saving')
+        try {
+            if (pick.stopLoss !== null) {
+                await window.api.alerts.add({
+                    code: pick.code,
+                    name: pick.name,
+                    kind: 'price_below',
+                    target: pick.stopLoss,
+                    note: 'AI 止损位',
+                    source: 'ai',
+                })
+            }
+            if (pick.takeProfit !== null) {
+                await window.api.alerts.add({
+                    code: pick.code,
+                    name: pick.name,
+                    kind: 'price_above',
+                    target: pick.takeProfit,
+                    note: 'AI 止盈位',
+                    source: 'ai',
+                })
+            }
+            setState('done')
+        } catch {
+            setState('error')
+        }
+    }
+
+    return (
+        <button className="chat-pick-adopt" onClick={adopt} disabled={state === 'saving' || state === 'done'}>
+            {state === 'done' ? '✓ 已设提醒' : state === 'error' ? '设置失败，重试' : '🔔 止损/止盈提醒'}
+        </button>
+    )
 }
 
 interface Props {
@@ -24,6 +66,8 @@ export default function DecisionCard({ data, onOpenFull }: Props) {
     const picks = structuredDecision?.picks ?? []
     const diag = data.diagnostics
     const hasDebate = !!(diag && (diag.bullResearch || diag.bearResearch || (diag.riskVerdicts && diag.riskVerdicts.length > 0)))
+    const turns = diag?.debateHistory ?? []
+    const rounds = diag?.debateRounds ?? 1
 
     return (
         <div className="chat-decision-card">
@@ -66,6 +110,7 @@ export default function DecisionCard({ data, onOpenFull }: Props) {
                                     <span>保守 {money(p.conservativeEntry)}</span>
                                     <span className="down">止损 {money(p.stopLoss)}</span>
                                     <span className="up">止盈 {money(p.takeProfit)}</span>
+                                    <AdoptAlertsButton pick={p} />
                                 </div>
                             )}
                             {p.noBuyCondition && (
@@ -112,9 +157,26 @@ export default function DecisionCard({ data, onOpenFull }: Props) {
 
             {hasDebate && diag && (
                 <details className="chat-decision-context">
-                    <summary>多空辩论 & 风控裁决</summary>
+                    <summary>
+                        多空辩论 & 风控裁决
+                        {rounds > 1 ? `（${rounds} 轮交替反驳）` : ''}
+                    </summary>
                     <div className="chat-debate-mini">
-                        {diag.bullResearch && (
+                        {/* 有逐轮记录时按发言顺序展示，能看出谁在反驳谁；否则退回旧的两段式 */}
+                        {turns.length > 0
+                            ? turns.map((t, i) => (
+                                  <div className="chat-debate-block" key={i}>
+                                      <span className={`chat-debate-tag ${t.side === 'bull' ? 'up' : 'down'}`}>
+                                          {t.side === 'bull' ? '🐂 多头' : '🐻 空头'}
+                                          {rounds > 1 ? ` · 第 ${t.round} 轮` : ''}
+                                      </span>
+                                      <div className="markdown-body chat-markdown">
+                                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{t.content}</ReactMarkdown>
+                                      </div>
+                                  </div>
+                              ))
+                            : null}
+                        {turns.length === 0 && diag.bullResearch && (
                             <div className="chat-debate-block">
                                 <span className="chat-debate-tag up">🐂 多头</span>
                                 <div className="markdown-body chat-markdown">
@@ -124,7 +186,7 @@ export default function DecisionCard({ data, onOpenFull }: Props) {
                                 </div>
                             </div>
                         )}
-                        {diag.bearResearch && (
+                        {turns.length === 0 && diag.bearResearch && (
                             <div className="chat-debate-block">
                                 <span className="chat-debate-tag down">🐻 空头</span>
                                 <div className="markdown-body chat-markdown">

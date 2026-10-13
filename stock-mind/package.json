@@ -11,7 +11,10 @@
         "pack": "electron-builder --dir",
         "dist": "electron-builder",
         "dist:mac": "electron-builder && xattr -cr dist/*.dmg && echo '✅ dmg 已去除隔离标记，可直接发给别人'",
+        "dist:win": "electron-builder --win --publish never",
         "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "init": "rm -rf node_modules && npm install"
     },
     "dependencies": {
@@ -23,6 +26,7 @@
         "axios": "^1.7.2",
         "echarts": "^5.5.0",
         "echarts-for-react": "^3.0.2",
+        "electron-updater": "6.8.9",
         "iconv-lite": "^0.7.3",
         "node-cron": "^3.0.3",
         "react": "^18.3.1",
@@ -47,11 +51,19 @@
         "electron-builder": "^24.13.3",
         "electron-vite": "^5.0.0",
         "typescript": "^5.5.3",
-        "vite": "^5.3.3"
+        "vite": "^5.3.3",
+        "vitest": "2.1.9"
     },
     "build": {
         "appId": "com.stockmind.app",
         "productName": "StockMind",
+        "publish": [
+            {
+                "provider": "github",
+                "owner": "1208Mo",
+                "repo": "stock-study"
+            }
+        ],
         "directories": {
             "output": "dist"
         },
