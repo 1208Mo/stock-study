@@ -140,6 +140,36 @@ export interface BreadthTick {
     down: number
 }
 
+export interface LimitDownStock {
+    code: string
+    name: string
+    price: number
+    changePercent: number
+    /** 连续跌停天数：1=首次跌停 */
+    days: number
+    industry: string
+    /** 跌停板上的卖单封单金额（元），越大说明抛压越重 */
+    sealFund: number
+    /** 盘中打开跌停的次数（撬板），多说明有资金在抄底 */
+    openCount: number
+    /** 最后一次封跌停时间 HH:MM */
+    lastSealTime: string
+}
+
+export interface BrokenBoardStock {
+    code: string
+    name: string
+    price: number
+    changePercent: number
+    /** 盘中最大振幅 % */
+    amplitude: number
+    /** 炸板次数 */
+    breakCount: number
+    industry: string
+    /** 首次触及涨停时间 HH:MM */
+    firstSealTime: string
+}
+
 export interface MarketBreadth {
     /** 两个数据源都失败时为 null */
     up: number | null
@@ -156,6 +186,10 @@ export interface MarketBreadth {
     sealRate: number | null
     /** 连板梯队：按连板数从高到低 */
     ladder: Array<{ boards: number; stocks: LimitUpStock[] }>
+    /** 跌停梯队：按连续跌停天数从高到低，同层按封单金额从大到小 */
+    limitDownLadder: Array<{ days: number; stocks: LimitDownStock[] }>
+    /** 炸板股：按当前涨跌幅从低到高（回落越深越靠前） */
+    brokenStocks: BrokenBoardStock[]
     /** 数据所属交易日 YYYY-MM-DD（非交易日时为最近一个交易日） */
     tradeDate: string | null
 }
@@ -181,7 +215,7 @@ async function fetchPool(
             ut: '7eea3edcaed734bea9cbfc24409ed989',
             dpt: 'wz.ztzt',
             Pageindex: 0,
-            pagesize: kind === 'ZT' ? 500 : 1,
+            pagesize: 500,
             sort: kind === 'DT' ? 'fund:asc' : 'fbt:asc',
             date,
         },
@@ -193,6 +227,57 @@ async function fetchPool(
 }
 
 type BreadthCounts = Pick<MarketBreadth, 'up' | 'down' | 'flat'> & { intraday: BreadthTick[] }
+
+/** 题材池价格字段是「元 × 1000」的整数 */
+function poolPrice(p: unknown): number {
+    const v = Number(p)
+    return Number.isFinite(v) ? v / 1000 : 0
+}
+
+function num(v: unknown): number {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : 0
+}
+
+/** 解析东财跌停池，按连续跌停天数分层。 */
+export function parseLimitDownPool(pool: Array<Record<string, unknown>>): MarketBreadth['limitDownLadder'] {
+    const byDays = new Map<number, LimitDownStock[]>()
+    for (const p of pool) {
+        const stock: LimitDownStock = {
+            code: String(p.c),
+            name: String(p.n),
+            price: poolPrice(p.p),
+            changePercent: num(p.zdp),
+            days: Number(p.days) || 1,
+            industry: String(p.hybk ?? ''),
+            sealFund: num(p.fund),
+            openCount: num(p.oc),
+            lastSealTime: formatSealTime(p.lbt),
+        }
+        const arr = byDays.get(stock.days) ?? []
+        arr.push(stock)
+        byDays.set(stock.days, arr)
+    }
+    return [...byDays.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .map(([days, stocks]) => ({ days, stocks: stocks.sort((a, b) => b.sealFund - a.sealFund) }))
+}
+
+/** 解析东财炸板池，回落最深的排在前面。 */
+export function parseBrokenBoardPool(pool: Array<Record<string, unknown>>): BrokenBoardStock[] {
+    return pool
+        .map((p) => ({
+            code: String(p.c),
+            name: String(p.n),
+            price: poolPrice(p.p),
+            changePercent: num(p.zdp),
+            amplitude: num(p.zf),
+            breakCount: num(p.zbc) || 1,
+            industry: String(p.hybk ?? ''),
+            firstSealTime: formatSealTime(p.fbt),
+        }))
+        .sort((a, b) => a.changePercent - b.changePercent)
+}
 
 async function fetchBreadthFromEastmoney(): Promise<BreadthCounts> {
     const resp = await withPush2(() =>
@@ -265,10 +350,18 @@ export const fetchMarketBreadth = cached(30_000, async (): Promise<MarketBreadth
 
     let limitDown = 0
     let brokenBoard = 0
+    let limitDownLadder: MarketBreadth['limitDownLadder'] = []
+    let brokenStocks: BrokenBoardStock[] = []
     if (tradeDate) {
         const [dt, zb] = await Promise.allSettled([fetchPool('DT', tradeDate), fetchPool('ZB', tradeDate)])
-        if (dt.status === 'fulfilled') limitDown = dt.value.total
-        if (zb.status === 'fulfilled') brokenBoard = zb.value.total
+        if (dt.status === 'fulfilled') {
+            limitDown = dt.value.total
+            limitDownLadder = parseLimitDownPool(dt.value.pool)
+        }
+        if (zb.status === 'fulfilled') {
+            brokenBoard = zb.value.total
+            brokenStocks = parseBrokenBoardPool(zb.value.pool)
+        }
     }
 
     const byBoards = new Map<number, LimitUpStock[]>()
@@ -296,6 +389,8 @@ export const fetchMarketBreadth = cached(30_000, async (): Promise<MarketBreadth
         brokenBoard,
         sealRate: limitUp + brokenBoard > 0 ? (limitUp / (limitUp + brokenBoard)) * 100 : null,
         ladder,
+        limitDownLadder,
+        brokenStocks,
         tradeDate: tradeDate ? `${tradeDate.slice(0, 4)}-${tradeDate.slice(4, 6)}-${tradeDate.slice(6)}` : null,
     }
 })

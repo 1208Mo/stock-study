@@ -24,15 +24,21 @@ export interface KLineData {
     volume: number
 }
 
-function getSecid(code: string): string {
+/** 带交易所前缀的代码（sh000001 / sz399006），用于指数等无法仅凭 6 位数字判断市场的标的 */
+const PREFIXED_CODE = /^(sh|sz)(\d{6})$/i
+
+export function getSecid(code: string): string {
     const normalized = code.trim()
+    const prefixed = normalized.match(PREFIXED_CODE)
+    if (prefixed) return `${prefixed[1].toLowerCase() === 'sh' ? 1 : 0}.${prefixed[2]}`
     const isShanghai = /^[569]/.test(normalized)
     return `${isShanghai ? 1 : 0}.${normalized}`
 }
 
 // 新浪行情代码格式：sh600519 / sz000001
-function getSinaSymbol(code: string): string {
+export function getSinaSymbol(code: string): string {
     const normalized = code.trim()
+    if (PREFIXED_CODE.test(normalized)) return normalized.toLowerCase()
     const isShanghai = /^[569]/.test(normalized)
     return `${isShanghai ? 'sh' : 'sz'}${normalized}`
 }
@@ -665,7 +671,21 @@ export async function fetchTopSectors(
     }
 }
 
-export async function searchStock(keyword: string): Promise<{ code: string; name: string }[]> {
+export interface StockSearchItem {
+    code: string
+    name: string
+    /** 东财市场号：1=沪 0=深，其他（港美股等）为境外市场 */
+    market: string
+    /** 东财分类：AStock / Index / Fund ... */
+    type: string
+    /**
+     * 可直接传给 fetchQuote 的代码：指数带交易所前缀（sh000001），
+     * 避免和同号个股（上证指数 000001 ↔ 平安银行 000001）冲突；其余与 code 相同。
+     */
+    quoteCode: string
+}
+
+export async function searchStock(keyword: string): Promise<StockSearchItem[]> {
     const url = `https://searchapi.eastmoney.com/api/suggest/get`
     const params = {
         input: keyword,
@@ -677,10 +697,18 @@ export async function searchStock(keyword: string): Promise<{ code: string; name
     const resp = await axios.get(url, { params, timeout: 5000 })
     const list = resp.data?.QuotationCodeTable?.Data ?? []
 
-    return list.map((item: { Code: string; Name: string }) => ({
-        code: item.Code,
-        name: item.Name,
-    }))
+    return list.map((item: { Code: string; Name: string; MktNum?: string; Classify?: string }) => {
+        const market = String(item.MktNum ?? '')
+        const type = String(item.Classify ?? '')
+        const prefix = market === '1' ? 'sh' : market === '0' ? 'sz' : ''
+        return {
+            code: item.Code,
+            name: item.Name,
+            market,
+            type,
+            quoteCode: type === 'Index' && prefix ? `${prefix}${item.Code}` : item.Code,
+        }
+    })
 }
 
 /**

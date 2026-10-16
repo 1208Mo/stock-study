@@ -208,6 +208,28 @@ const api = {
         },
     },
 
+    // 小屏盯盘
+    mini: {
+        getConfig: () => ipcRenderer.invoke('mini:getConfig'),
+        setConfig: (patch: Record<string, unknown>) => ipcRenderer.invoke('mini:setConfig', patch),
+        toggle: () => ipcRenderer.invoke('mini:toggle'),
+        snapshot: () => ipcRenderer.invoke('mini:snapshot'),
+        clearEvents: () => ipcRenderer.invoke('mini:clearEvents'),
+        openStock: (code: string, name?: string) => ipcRenderer.invoke('mini:openStock', code, name),
+        setInteractive: (interactive: boolean) => ipcRenderer.send('mini:setInteractive', interactive),
+        popupMenu: (target?: { code: string; name: string }) => ipcRenderer.send('mini:popupMenu', target),
+        onSnapshot: (cb: (snapshot: unknown) => void) => {
+            const handler = (_: unknown, s: unknown) => cb(s)
+            ipcRenderer.on('mini:snapshot', handler)
+            return () => ipcRenderer.removeListener('mini:snapshot', handler)
+        },
+        onEvent: (cb: (event: unknown) => void) => {
+            const handler = (_: unknown, e: unknown) => cb(e)
+            ipcRenderer.on('mini:event', handler)
+            return () => ipcRenderer.removeListener('mini:event', handler)
+        },
+    },
+
     // Settings
     settings: {
         get: (key: string) => ipcRenderer.invoke('settings:get', key),

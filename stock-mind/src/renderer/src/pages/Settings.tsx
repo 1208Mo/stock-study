@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useSettingsStore } from '../stores/settingsStore'
 import type { AIProvider } from '../stores/settingsStore'
-import type { DataSourceStatus } from '../types'
+import type { DataSourceStatus, MiniConfig } from '../types'
 import type { InvestorProfile } from '../types'
 import UpdateSection from '../components/UpdateSection'
+import MiniStockPicker from '../components/MiniStockPicker'
 
 const THEMES: { id: string; label: string; sidebar: string; main: string; primary: string }[] = [
     { id: 'dark', label: '深色', sidebar: '#12151f', main: '#0f1117', primary: '#4f8ef7' },
@@ -149,6 +151,24 @@ export default function Settings() {
     const [showCustomKey, setShowCustomKey] = useState(false)
     const [currentTheme, setCurrentTheme] = useState(() => localStorage.getItem('theme') || 'dark')
     const [trayEnabled, setTrayEnabled] = useState(true)
+    const [miniCfg, setMiniCfg] = useState<MiniConfig | null>(null)
+    const [miniError, setMiniError] = useState<string | null>(null)
+    const [bossKeyDraft, setBossKeyDraft] = useState('')
+    const [searchParams] = useSearchParams()
+    // 从小窗菜单「选择盯盘股票…」跳过来时，直接滚到小屏盯盘设置
+    useEffect(() => {
+        if (miniCfg && searchParams.get('section') === 'mini') {
+            document.getElementById('settings-mini')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+    }, [searchParams, !!miniCfg])
+    const updateMini = async (patch: Partial<MiniConfig>) => {
+        // 先乐观更新，连续勾选时下一次 onChange 能基于最新的选择计算
+        setMiniCfg((prev) => (prev ? { ...prev, ...patch } : prev))
+        const r = await window.api.mini.setConfig(patch)
+        setMiniCfg(r.config)
+        setBossKeyDraft(r.config.bossKey)
+        setMiniError(r.error)
+    }
     const [sourceStatus, setSourceStatus] = useState<DataSourceStatus | null>(null)
     const [probing, setProbing] = useState(false)
     const [debateRounds, setDebateRounds] = useState(1)
@@ -194,6 +214,10 @@ export default function Settings() {
     }
     useEffect(() => {
         window.api.settings.get('tray_enabled').then((v) => setTrayEnabled(v !== '0'))
+        window.api.mini.getConfig().then((c) => {
+            setMiniCfg(c)
+            setBossKeyDraft(c.bossKey)
+        })
         window.api.settings
             .get('agent_debate_rounds')
             .then((v) => setDebateRounds(Math.min(3, Math.max(1, Number(v) || 1))))
@@ -529,6 +553,86 @@ export default function Settings() {
                     交易时段每 30 秒刷新，点击菜单栏可查看涨跌最大的持仓。价格提醒在「提醒中心」管理。
                 </p>
             </section>
+
+            {miniCfg && (
+                <section className="settings-section" id="settings-mini">
+                    <h2>小屏盯盘</h2>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={miniCfg.enabled}
+                            onChange={(e) => updateMini({ enabled: e.target.checked })}
+                        />
+                        <span>开启桌面置顶小窗（点小窗右上角 ⋯ 可切换低调模式、透明度等）</span>
+                    </label>
+                    <MiniStockPicker
+                        codes={miniCfg.codes}
+                        labels={miniCfg.labels}
+                        onChange={(codes, labels) => updateMini({ codes, labels })}
+                    />
+                    <div className="provider-card-fields" style={{ marginTop: 12 }}>
+                        <div className="provider-field-row">
+                            <label>老板键</label>
+                            <input
+                                className="input"
+                                placeholder="例如 Alt+Shift+M，留空不启用"
+                                value={bossKeyDraft}
+                                onChange={(e) => setBossKeyDraft(e.target.value)}
+                                onBlur={() => bossKeyDraft !== miniCfg.bossKey && updateMini({ bossKey: bossKeyDraft })}
+                            />
+                        </div>
+                        {(
+                            [
+                                ['surgePct', '涨速异动 %', '5 分钟内涨跌超过该幅度时提醒，0 关闭'],
+                                ['takeProfitPct', '止盈线 %', '持仓相对成本盈利达到该比例时提醒，0 关闭'],
+                                ['stopLossPct', '止损线 %', '持仓相对成本亏损达到该比例时提醒，0 关闭'],
+                            ] as const
+                        ).map(([key, text, hint]) => (
+                            <div className="provider-field-row" key={key}>
+                                <label>{text}</label>
+                                <input
+                                    key={miniCfg[key]}
+                                    className="input"
+                                    type="number"
+                                    min={0}
+                                    step={0.5}
+                                    title={hint}
+                                    placeholder={hint}
+                                    defaultValue={miniCfg[key]}
+                                    onBlur={(e) => {
+                                        const v = Number(e.target.value)
+                                        if (Number.isFinite(v) && v !== miniCfg[key]) updateMini({ [key]: v })
+                                    }}
+                                />
+                            </div>
+                        ))}
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 12 }}>
+                        {(
+                            [
+                                ['silent', '静默提醒（不弹系统通知，价格提醒/技术信号也改走小窗）'],
+                                ['stealth', '低调模式（灰度配色、用代码代替名称）'],
+                                ['clickThrough', '鼠标穿透（只有顶部把手可拖动/右键）'],
+                                ['closeReminder', '14:50 尾盘提醒'],
+                            ] as const
+                        ).map(([key, text]) => (
+                            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={miniCfg[key]}
+                                    onChange={(e) => updateMini({ [key]: e.target.checked })}
+                                />
+                                <span>{text}</span>
+                            </label>
+                        ))}
+                    </div>
+                    {miniError && <p className="settings-note" style={{ color: 'var(--danger, #f0524f)' }}>{miniError}</p>}
+                    <p className="settings-note">
+                        交易时段每 5 秒刷新，提醒规则只对小窗里显示的股票生效：同一只票的涨速提醒 15 分钟内不重复，
+                        止盈/止损每天最多一次。老板键会隐藏本应用所有窗口，再按一次恢复。macOS 菜单栏图标里也能显示/隐藏小窗。
+                    </p>
+                </section>
+            )}
 
             <UpdateSection />
 

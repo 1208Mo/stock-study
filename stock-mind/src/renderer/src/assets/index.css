@@ -4841,6 +4841,42 @@ body {
     color: var(--primary);
 }
 
+/* 跌停 / 炸板看板：复用连板梯队的布局，配色换成下跌色 */
+.ladder-badge-down.hot {
+    background: var(--down-bg);
+    color: var(--down);
+}
+.ladder-stock-down:hover {
+    border-color: var(--down);
+    color: var(--down);
+}
+.decline-tabs {
+    display: flex;
+    gap: 4px;
+}
+.decline-tabs button {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.decline-tabs button.active {
+    color: var(--down);
+    background: var(--down-bg);
+}
+.decline-broken {
+    max-height: 240px;
+    overflow-y: auto;
+}
+.decline-pct {
+    font-size: 11px;
+    margin-left: 2px;
+    font-variant-numeric: tabular-nums;
+}
+
 /* 快讯 */
 .news-list {
     list-style: none;
@@ -6244,4 +6280,133 @@ body {
     background: var(--bg-hover);
     border-radius: var(--radius-sm);
     padding: 8px 10px;
+}
+
+/* ─── 设置页：小屏盯盘选股器 ─── */
+.mini-pick {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 12px;
+}
+.mini-pick-col {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    min-width: 0;
+}
+.mini-pick-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.mini-pick-tab {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.mini-pick-tab.active {
+    color: var(--primary);
+    background: var(--bg-hover);
+}
+.mini-pick-search {
+    flex: 1 1 140px;
+    min-width: 140px;
+    height: 24px;
+    font-size: 12px;
+}
+.mini-pick-list {
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+.mini-pick-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    font-size: 13px;
+}
+.mini-pick-item:hover {
+    background: var(--bg-hover);
+}
+.mini-pick-item.selectable {
+    cursor: pointer;
+}
+.mini-pick-item.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.mini-pick-order {
+    width: 16px;
+    color: var(--text-subtle);
+    font-size: 11px;
+    text-align: right;
+}
+.mini-pick-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.mini-pick-code {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.mini-pick-tag {
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 3px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+}
+.mini-pick-tag.held {
+    color: var(--primary);
+    border-color: var(--primary-glow);
+}
+.mini-pick-tag.gone {
+    color: var(--warning);
+}
+.mini-pick-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 2px;
+}
+.mini-pick-actions button {
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 4px;
+    border-radius: 3px;
+}
+.mini-pick-actions button:hover:not(:disabled) {
+    color: var(--primary);
+    background: var(--bg-hover);
+}
+.mini-pick-actions button:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+.mini-pick-empty {
+    padding: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.mini-pick-section {
+    padding: 6px 10px 2px;
+    font-size: 11px;
+    color: var(--text-subtle);
+    border-top: 1px solid var(--border-light);
+    margin-top: 4px;
 }

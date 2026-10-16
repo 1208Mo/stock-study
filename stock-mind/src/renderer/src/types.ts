@@ -303,6 +303,29 @@ export interface LimitUpStock {
     firstSealTime: string
 }
 
+export interface LimitDownStock {
+    code: string
+    name: string
+    price: number
+    changePercent: number
+    days: number
+    industry: string
+    sealFund: number
+    openCount: number
+    lastSealTime: string
+}
+
+export interface BrokenBoardStock {
+    code: string
+    name: string
+    price: number
+    changePercent: number
+    amplitude: number
+    breakCount: number
+    industry: string
+    firstSealTime: string
+}
+
 export interface BreadthTick {
     time: string
     up: number
@@ -319,6 +342,8 @@ export interface MarketBreadth {
     brokenBoard: number
     sealRate: number | null
     ladder: Array<{ boards: number; stocks: LimitUpStock[] }>
+    limitDownLadder: Array<{ days: number; stocks: LimitDownStock[] }>
+    brokenStocks: BrokenBoardStock[]
     tradeDate: string | null
 }
 
@@ -711,6 +736,52 @@ export interface SignalStats {
     trips: SignalRoundTrip[]
 }
 
+// ===== 小屏盯盘 =====
+
+export interface MiniConfig {
+    enabled: boolean
+    /** 手动挑选的股票代码（按显示顺序）；为空时默认显示前 5 只持仓/自选 */
+    codes: string[]
+    /** 代码 → 名称，记住全网搜索加进来的票（不在持仓/自选里）的名称 */
+    labels: Record<string, string>
+    opacity: number
+    stealth: boolean
+    silent: boolean
+    clickThrough: boolean
+    bossKey: string
+    surgePct: number
+    takeProfitPct: number
+    stopLossPct: number
+    closeReminder: boolean
+}
+
+export interface MiniRow {
+    code: string
+    name: string
+    price: number
+    changePercent: number
+    costPct: number | null
+}
+
+export interface MiniEvent {
+    id: number
+    code?: string
+    name?: string
+    text: string
+    level: 'up' | 'down' | 'info'
+    at: number
+}
+
+export interface MiniSnapshot {
+    rows: MiniRow[]
+    index: { code: string; name: string; price: number; change: number; changePercent: number } | null
+    trading: boolean
+    updatedAt: number
+    error: string | null
+    events: MiniEvent[]
+    config: MiniConfig
+}
+
 // ===== 自动更新 =====
 
 export interface UpdateState {
@@ -787,7 +858,9 @@ declare global {
                     perSector?: number
                 ) => Promise<Array<{ code: string; name: string }>>
                 getAmbushSectors: (limit?: number) => Promise<AmbushSector[]>
-                search: (keyword: string) => Promise<{ code: string; name: string }[]>
+                search: (keyword: string) => Promise<
+                    Array<{ code: string; name: string; market: string; type: string; quoteCode: string }>
+                >
                 getSectorInfo: (code: string) => Promise<{ sector: string; subSector: string }>
                 getSectorKLine: (bkCode: string, days?: number) => Promise<KLineData[]>
                 getDividends: (code: string) => Promise<DividendRecord[]>
@@ -917,6 +990,18 @@ declare global {
                 setTrayEnabled: (enabled: boolean) => Promise<void>
                 onNavigate: (cb: (route: string) => void) => () => void
                 onRefresh: (cb: () => void) => () => void
+            }
+            mini: {
+                getConfig: () => Promise<MiniConfig>
+                setConfig: (patch: Partial<MiniConfig>) => Promise<{ config: MiniConfig; error: string | null }>
+                toggle: () => Promise<void>
+                snapshot: () => Promise<MiniSnapshot>
+                clearEvents: () => Promise<void>
+                openStock: (code: string, name?: string) => Promise<void>
+                setInteractive: (interactive: boolean) => void
+                popupMenu: (target?: { code: string; name: string }) => void
+                onSnapshot: (cb: (snapshot: MiniSnapshot) => void) => () => void
+                onEvent: (cb: (event: MiniEvent) => void) => () => void
             }
             settings: {
                 get: (key: string) => Promise<string | null>

@@ -10,6 +10,7 @@
 import { app, BrowserWindow, Menu, Notification, Tray, nativeImage } from 'electron'
 import { fetchBatchQuotes, type QuoteData } from './market'
 import { shanghaiDateStr, isTradingTime } from './tradingCalendar'
+import { routeToMini, toggleMiniWindow } from './miniTicker'
 import {
     getAllHoldings,
     getSetting,
@@ -85,6 +86,8 @@ export async function checkPriceAlerts(hooks: AlertHooks, force = false): Promis
             recordAlertTriggered(alert, message, q.price)
             fired++
 
+            // 小屏盯盘静默模式下改由小窗提示，不弹系统通知
+            if (routeToMini({ code: alert.code, name: alert.name, text: `🔔 ${message}` })) continue
             const n = new Notification({ title: `🔔 ${alert.name} 价格提醒`, body: message })
             n.on('click', () => hooks.openRoute(`/stock/${alert.code}?name=${encodeURIComponent(alert.name)}`))
             n.show()
@@ -121,6 +124,7 @@ async function refreshTray(force = false): Promise<void> {
     const baseItems: Electron.MenuItemConstructorOptions[] = [
         { label: '打开 StockMind', click: () => hooks.openRoute('/') },
         { label: '提醒中心', click: () => hooks.openRoute('/alerts') },
+        { label: '显示/隐藏小屏盯盘', click: () => toggleMiniWindow() },
         { type: 'separator' },
         { label: '隐藏菜单栏盈亏', click: () => setTrayEnabled(false) },
         { label: '退出', click: () => app.quit() },

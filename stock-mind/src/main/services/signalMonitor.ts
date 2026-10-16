@@ -9,6 +9,7 @@
  */
 
 import { BrowserWindow, Notification } from 'electron'
+import { getMiniConfig, routeToMini } from './miniTicker'
 import { fetchBatchQuotes, fetchKLineEx, type KLinePeriod } from './market'
 import { isTradingTime, isTradingDay, shanghaiNow, shanghaiDateStr } from './tradingCalendar'
 import {
@@ -182,6 +183,15 @@ export async function scanSignals(
 function notify(hooks: SignalHooks, fresh: NewSignal[]): void {
     const line = (s: NewSignal) =>
         `${s.direction === 'buy' ? '买点' : '卖点'}｜${s.name} ${periodText(s.period)} ${s.signalName}，${s.price}`
+    // 小屏盯盘静默模式下改由小窗提示，不弹系统通知
+    const mini = getMiniConfig()
+    if (mini.enabled && mini.silent) {
+        for (const s of fresh.slice(0, 5)) {
+            routeToMini({ code: s.code, name: s.name, text: `📈 ${line(s)}`, level: s.direction === 'buy' ? 'up' : 'down' })
+        }
+        if (fresh.length > 5) routeToMini({ text: `📈 另有 ${fresh.length - 5} 个技术信号，见提醒中心` })
+        return
+    }
     // 同一轮触发太多时合并成一条，避免通知刷屏
     if (fresh.length > 3) {
         const buys = fresh.filter((s) => s.direction === 'buy').length

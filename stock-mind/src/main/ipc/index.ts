@@ -85,6 +85,17 @@ import { fetchFundamentals } from '../services/fundamentals'
 import { fetchIndexTicker, fetchMarketBreadth, fetchSectorHeatmap, fetchNewsFlash } from '../services/marketOverview'
 import { assessMarketRegime } from '../services/marketRegime'
 import { checkPriceAlerts, setTrayEnabled } from '../services/alerts'
+import {
+    clearMiniEvents,
+    getMiniConfig,
+    getMiniSnapshot,
+    openMiniStock,
+    popupMiniMenu,
+    setMiniInteractive,
+    toggleMiniWindow,
+    updateMiniConfig,
+    type MiniConfig,
+} from '../services/miniTicker'
 import { getPush2Status, probePush2 } from '../services/dataSource'
 import { runBacktest, STRATEGIES, type StrategyId } from '../services/backtest'
 import { BUILTIN_PRESETS, cancelScreener, runScreener, type ScreenerCriteria } from '../services/screener'
@@ -481,6 +492,16 @@ export function registerAllIpcHandlers(): void {
         return getPush2Status()
     })
     ipcMain.handle('app:setTrayEnabled', (_e, enabled: boolean) => setTrayEnabled(enabled))
+
+    // 小屏盯盘
+    ipcMain.handle('mini:getConfig', () => getMiniConfig())
+    ipcMain.handle('mini:setConfig', (_e, patch: Partial<MiniConfig>) => updateMiniConfig(patch))
+    ipcMain.handle('mini:toggle', () => toggleMiniWindow())
+    ipcMain.handle('mini:snapshot', () => getMiniSnapshot())
+    ipcMain.handle('mini:clearEvents', () => clearMiniEvents())
+    ipcMain.handle('mini:openStock', (_e, code: string, name?: string) => openMiniStock(code, name))
+    ipcMain.on('mini:setInteractive', (_e, interactive: boolean) => setMiniInteractive(interactive))
+    ipcMain.on('mini:popupMenu', (_e, target?: { code: string; name: string }) => popupMiniMenu(target))
 
     ipcMain.handle('stock:news', (_e, code: string, count?: number) => fetchStockNews(code, count ?? 20))
     ipcMain.handle('stock:notices', (_e, code: string, count?: number) => fetchStockNotices(code, count ?? 20))

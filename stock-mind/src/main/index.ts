@@ -7,6 +7,8 @@ import { startAlertMonitor } from './services/alerts'
 import { startSignalMonitor } from './services/signalMonitor'
 import { startAutoUpdateCheck } from './services/updater'
 import { startDataSourceMonitor } from './services/dataSource'
+import { startMiniTicker, stopMiniTicker } from './services/miniTicker'
+import { startPerfMonitor } from './services/perfMonitor'
 
 // 必须在 app.whenReady() 之前设置，否则 dev 模式下 Electron 会用 package.json 的 name
 // (stock-mind) 作为 userData，导致 Local Storage / Session Storage 等落到 stock-mind 目录，
@@ -221,6 +223,7 @@ app.whenReady().then(async () => {
     await initDatabase()
     startDataSourceMonitor()
     registerAllIpcHandlers()
+    startPerfMonitor()
     startScheduler()
     createWindow()
     createPetWindow()
@@ -229,6 +232,10 @@ app.whenReady().then(async () => {
         sendToPet: (message) => petWindow?.webContents.send('pet:state', { type: 'surprised', message }),
     })
     startSignalMonitor({
+        openRoute: (route) => showMainWindow(route),
+        sendToPet: (message) => petWindow?.webContents.send('pet:state', { type: 'surprised', message }),
+    })
+    startMiniTicker({
         openRoute: (route) => showMainWindow(route),
         sendToPet: (message) => petWindow?.webContents.send('pet:state', { type: 'surprised', message }),
     })
@@ -251,6 +258,8 @@ app.on('before-quit', () => {
         console.error('[app] 退出前落盘失败:', e)
     }
 })
+
+app.on('will-quit', () => stopMiniTicker())
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {

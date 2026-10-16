@@ -188,6 +188,84 @@ function BreadthCard({ data, theme }: { data: MarketBreadth | null; theme: Chart
     )
 }
 
+function DeclineCard({ data }: { data: MarketBreadth | null }) {
+    const navigate = useNavigate()
+    const [tab, setTab] = useState<'limitDown' | 'broken'>('limitDown')
+    const [expanded, setExpanded] = useState(false)
+    if (!data) return <div className="dash-card dash-skeleton" style={{ height: 180 }} />
+
+    const ladder = data.limitDownLadder ?? []
+    const broken = data.brokenStocks ?? []
+    const BROKEN_PREVIEW = 12
+    const shownBroken = expanded ? broken : broken.slice(0, BROKEN_PREVIEW)
+
+    return (
+        <div className="dash-card">
+            <div className="dash-card-header">
+                <Tooltip content="下跌看板：跌停按连续跌停天数分层，炸板是盘中摸到涨停却没封住、回落下来的票。用来感知恐慌和追高被套的程度">
+                    <h3>跌停 / 炸板</h3>
+                </Tooltip>
+                <div className="decline-tabs">
+                    <button className={tab === 'limitDown' ? 'active' : ''} onClick={() => setTab('limitDown')}>
+                        跌停 {data.limitDown}
+                    </button>
+                    <button className={tab === 'broken' ? 'active' : ''} onClick={() => setTab('broken')}>
+                        炸板 {data.brokenBoard}
+                    </button>
+                </div>
+            </div>
+            {tab === 'limitDown' ? (
+                ladder.length === 0 ? (
+                    <div className="dash-muted">{data.limitDown > 0 ? '跌停明细暂时获取不到' : '今天没有跌停股'}</div>
+                ) : (
+                    <div className="ladder-list">
+                        {ladder.map((level) => (
+                            <div key={level.days} className="ladder-row">
+                                <span className={`ladder-badge ladder-badge-down ${level.days >= 2 ? 'hot' : ''}`}>
+                                    {level.days === 1 ? '首次跌停' : `${level.days}连跌停`}
+                                    <em>{level.stocks.length}</em>
+                                </span>
+                                <div className="ladder-stocks">
+                                    {level.stocks.map((s) => (
+                                        <button
+                                            key={s.code}
+                                            className="ladder-stock ladder-stock-down"
+                                            title={`${s.industry} · 封单 ${formatMoney(s.sealFund)} · 开板 ${s.openCount} 次${s.lastSealTime ? ` · 最后封板 ${s.lastSealTime}` : ''}`}
+                                            onClick={() => navigate(stockRoute(s.code, s.name))}
+                                        >
+                                            {s.name}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )
+            ) : broken.length === 0 ? (
+                <div className="dash-muted">{data.brokenBoard > 0 ? '炸板明细暂时获取不到' : '今天没有炸板股'}</div>
+            ) : (
+                <div className="ladder-stocks decline-broken">
+                    {shownBroken.map((s) => (
+                        <button
+                            key={s.code}
+                            className="ladder-stock ladder-stock-down"
+                            title={`${s.industry} · 首次触板 ${s.firstSealTime} · 炸板 ${s.breakCount} 次 · 振幅 ${s.amplitude.toFixed(1)}%`}
+                            onClick={() => navigate(stockRoute(s.code, s.name))}
+                        >
+                            {s.name} <span className={`decline-pct ${trend(s.changePercent)}`}>{signed(s.changePercent)}%</span>
+                        </button>
+                    ))}
+                    {broken.length > BROKEN_PREVIEW && (
+                        <button className="ladder-more" onClick={() => setExpanded((v) => !v)}>
+                            {expanded ? '收起' : `+${broken.length - BROKEN_PREVIEW}`}
+                        </button>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
 function LadderCard({ data }: { data: MarketBreadth | null }) {
     const navigate = useNavigate()
     const [expanded, setExpanded] = useState(false)
@@ -477,6 +555,7 @@ export default function Dashboard() {
 
                 <div className="dash-side">
                     <LadderCard data={breadth.data} />
+                    <DeclineCard data={breadth.data} />
                     <NewsCard items={news.data} error={news.error} />
                 </div>
             </div>

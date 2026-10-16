@@ -1,10 +1,28 @@
 import { describe, it, expect } from 'vitest'
 import {
+    getSecid,
+    getSinaSymbol,
     parseEastmoneyQuote,
     parseSinaQuote,
     parseEastmoneyKlines,
     parseSinaKlines,
 } from './market'
+
+describe('getSecid / getSinaSymbol', () => {
+    it('6 位代码按首位判断沪深', () => {
+        expect(getSecid('600460')).toBe('1.600460')
+        expect(getSecid('000001')).toBe('0.000001')
+        expect(getSinaSymbol('510300')).toBe('sh510300')
+        expect(getSinaSymbol('159915')).toBe('sz159915')
+    })
+
+    it('带前缀的指数代码不和同号个股冲突', () => {
+        expect(getSecid('sh000001')).toBe('1.000001')
+        expect(getSecid('sz399006')).toBe('0.399006')
+        expect(getSinaSymbol('sh000001')).toBe('sh000001')
+        expect(getSinaSymbol('SZ399006')).toBe('sz399006')
+    })
+})
 
 describe('parseEastmoneyQuote', () => {
     it('股票按 f59=2 位小数缩放价格，f170/f152 缩放涨跌幅', () => {
